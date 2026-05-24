@@ -36,6 +36,12 @@ npx tsx src/cli.ts search "bread" --json
 | `slots` | Show available delivery time slots. |
 | `categories` | Browse product categories/departments. |
 | `trending` | Show popular/trending searches. |
+| `cart` / `cart view` | Show current cart contents (Sixty60 + Hyper sections, totals). |
+| `cart add <product-id> [--qty N] [--hyper]` | **Stub — dry-run only.** Looks up the product and shows what would be added. |
+| `cart remove <item-id>` | **Stub — dry-run only.** Shows what would be removed. |
+| `cart clear --confirm` | **Stub — dry-run only.** Shows clear intent. |
+| `cart suggestions` | Show have-you-forgotten product suggestions. |
+| `cart promos` | Show active promotions for your cart. |
 
 ## How It Works
 
@@ -64,7 +70,8 @@ checkers60 slots --json
 - [x] Product search
 - [x] Delivery slots
 - [x] Categories
-- [ ] Cart management (add, remove, view)
+- [x] Cart view, suggestions, promotions
+- [ ] Cart mutations (add, remove, clear) — currently stub / dry-run only for safety
 - [ ] Order history
 - [ ] Rapid reorder
 - [ ] Deals/specials
