@@ -26,27 +26,27 @@ export async function status(options: StatusOptions = {}): Promise<void> {
   };
 
   if (json) {
-    console.log(JSON.stringify(data, null, 2));
+    process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
     return;
   }
 
-  console.log("");
+  process.stdout.write("\n");
   if (sessionValid) {
-    console.log(chalk.green("✅ Logged in"));
+    process.stdout.write(`${chalk.green("✅ Logged in")}\n`);
   } else {
-    console.log(chalk.red("❌ Not logged in"));
-    console.log(chalk.dim('   Run: checkers60 login'));
+    process.stdout.write(`${chalk.red("❌ Not logged in")}\n`);
+    process.stdout.write(`${chalk.dim("   Run: checkers60 login")}\n`);
     return;
   }
 
-  if (displayName) console.log(chalk.dim(`   User: ${displayName}`));
-  if (customerId) console.log(chalk.dim(`   Customer: ${customerId}`));
-  if (addressId) console.log(chalk.dim(`   Address: ${addressId}`));
-  console.log(chalk.dim(`   Stores: ${storeContexts.length} nearby`));
+  if (displayName) process.stdout.write(`${chalk.dim(`   User: ${displayName}`)}\n`);
+  if (customerId) process.stdout.write(`${chalk.dim(`   Customer: ${customerId}`)}\n`);
+  if (addressId) process.stdout.write(`${chalk.dim(`   Address: ${addressId}`)}\n`);
+  process.stdout.write(`${chalk.dim(`   Stores: ${storeContexts.length} nearby`)}\n`);
   if (session?.savedAt) {
     const age = Date.now() - new Date(session.savedAt).getTime();
     const hours = Math.round(age / (60 * 60 * 1000));
-    console.log(chalk.dim(`   Session age: ${hours}h`));
+    process.stdout.write(`${chalk.dim(`   Session age: ${hours}h`)}\n`);
   }
-  console.log("");
+  process.stdout.write("\n");
 }
