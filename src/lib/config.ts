@@ -58,18 +58,3 @@ export const DATA_DIR_PATH = DATA_DIR;
 export function getStoreContexts(): StoreContext[] {
   return config.get("storeContexts") ?? [];
 }
-
-export function hasSession(): boolean {
-  try {
-    const fs = await_import_fs();
-    return fs.existsSync(COOKIES_PATH);
-  } catch {
-    return false;
-  }
-}
-
-// Lazy import to avoid top-level await
-function await_import_fs() {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require("node:fs") as typeof import("node:fs");
-}

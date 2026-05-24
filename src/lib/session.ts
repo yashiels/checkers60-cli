@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   COOKIES_PATH,
@@ -44,9 +44,8 @@ export function loadBrowserState(): unknown | null {
 }
 
 export function clearSession(): void {
-  const fs = await_import_fs();
   for (const p of [COOKIES_PATH, BROWSER_STATE_PATH]) {
-    if (fs.existsSync(p)) fs.unlinkSync(p);
+    if (existsSync(p)) unlinkSync(p);
   }
   config.clear();
 }
@@ -73,8 +72,4 @@ export function saveUserContext(data: {
   if (data.storeContexts) config.set("storeContexts", data.storeContexts);
   if (data.displayName) config.set("displayName", data.displayName);
   if (data.customerId) config.set("customerId", data.customerId);
-}
-
-function await_import_fs() {
-  return require("node:fs") as typeof import("node:fs");
 }
