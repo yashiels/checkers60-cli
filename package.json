@@ -1,0 +1,36 @@
+{
+  "name": "checkers60-cli",
+  "version": "0.1.0",
+  "description": "CLI for Checkers Sixty60 grocery delivery — search, cart, orders, reorder",
+  "type": "module",
+  "bin": {
+    "checkers60": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsup src/cli.ts --format esm --dts --clean",
+    "dev": "tsx src/cli.ts",
+    "lint": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "keywords": ["checkers", "sixty60", "grocery", "delivery", "cli", "south-africa"],
+  "author": "Yashiel Sookdeo <yashiel@skyner.co.za>",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "playwright": "^1.52.0",
+    "chalk": "^5.4.1",
+    "conf": "^13.1.0",
+    "ora": "^8.2.0",
+    "cli-table3": "^0.6.5"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0",
+    "@types/node": "^22.0.0"
+  }
+}
