@@ -10,7 +10,7 @@
     "build": "tsup src/cli.ts --format esm --dts --clean",
     "dev": "tsx src/cli.ts",
     "lint": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "keywords": ["checkers", "sixty60", "grocery", "delivery", "cli", "south-africa"],
   "author": "Yashiel Sookdeo <yashiel@skyner.co.za>",
