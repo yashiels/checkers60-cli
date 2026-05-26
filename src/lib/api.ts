@@ -111,6 +111,73 @@ export class CheckersAPI {
     const resp = await this.fetch("/api/catalogue/get-category-tree");
     return resp.json();
   }
+
+  async fetchCart(cartIds: string[] = []): Promise<CartState> {
+    if (this.storeContexts.length === 0) {
+      throw new Error(
+        "No store contexts configured. Run `checkers60 login` to set up your delivery address."
+      );
+    }
+
+    const resp = await this.fetch("/api/cart/fetch-cart", {
+      method: "POST",
+      body: JSON.stringify({
+        params: {
+          cartIds,
+          storeContexts: this.storeContexts,
+        },
+      }),
+    });
+
+    return resp.json() as Promise<CartState>;
+  }
+
+  async updateCart(
+    payload: CartUpdatePayload,
+    isNaiveUpdate = false
+  ): Promise<CartState> {
+    const resp = await this.fetch("/api/cart/update-cart", {
+      method: "POST",
+      body: JSON.stringify({ payload, isNaiveUpdate }),
+    });
+
+    return resp.json() as Promise<CartState>;
+  }
+
+  async getCartSuggestions(
+    cartIds: string[],
+    storeIds: string[]
+  ): Promise<unknown> {
+    const resp = await this.fetch("/api/cart/get-have-you-forgotten-products", {
+      method: "POST",
+      body: JSON.stringify({
+        cartIds,
+        storeIds,
+        storeContexts: this.storeContexts,
+      }),
+    });
+
+    return resp.json();
+  }
+
+  async getCartPromotions(cartId: string): Promise<unknown> {
+    const resp = await this.fetch("/api/cart/get-cart-promotions", {
+      method: "POST",
+      body: JSON.stringify({
+        cartId,
+        storeContexts: this.storeContexts,
+      }),
+    });
+
+    return resp.json();
+  }
+
+  async getProduct(productId: string): Promise<Product> {
+    const resp = await this.fetch(
+      `/api/v1/products/${encodeURIComponent(productId)}`
+    );
+    return resp.json() as Promise<Product>;
+  }
 }
 
 export class APIError extends Error {
@@ -157,3 +224,80 @@ export interface Promotion {
   savings?: number;
   [key: string]: unknown;
 }
+
+// Cart types — prices are in CENTS (e.g. 2999 = R29.99), priceFactor is always 100.
+
+export type CartServiceOptionId = "sixty-min-delivery" | "one-day-delivery";
+
+export interface CartLineItem {
+  id: string;
+  productId: string;
+  storeId: string;
+  price: number;
+  previousPrice: number;
+  priceFactor: number;
+  quantity: number;
+  specialInstructions: string;
+  replacementPreferenceId: string;
+  optionSelections?: unknown;
+  selectedWeightRange: unknown;
+  serviceOptionId: CartServiceOptionId;
+  hasAlcohol?: boolean;
+  requiresOver18?: boolean;
+  product: Product;
+  [key: string]: unknown;
+}
+
+export interface CartTotals {
+  productTotal: number;
+  discountTotal: number;
+  cartTotalAfterDiscounts: number;
+  [key: string]: unknown;
+}
+
+export interface ReplacementOption {
+  id: string;
+  code: string;
+  name: string;
+}
+
+export interface Cart {
+  id: string;
+  cartVersion?: number;
+  userId?: string;
+  serviceOptionId: CartServiceOptionId;
+  maximumCartSize?: number;
+  lineItems: CartLineItem[];
+  lineItemTotals: CartTotals;
+  deliveryAddress?: unknown;
+  deliveryAddressId?: string;
+  replacementOptions?: ReplacementOption[];
+  discountCodes?: string[];
+  cartSavings?: number;
+  [key: string]: unknown;
+}
+
+export interface CartState {
+  sixtyMinCart?: Cart;
+  oneDayCart?: Cart;
+  [key: string]: unknown;
+}
+
+export type CartUpdatePayload = Array<{
+  id: string;
+  serviceOptionId: CartServiceOptionId;
+  lineItems: Array<{
+    id: string;
+    productId: string;
+    storeId: string;
+    price: number;
+    previousPrice: number;
+    priceFactor: number;
+    quantity: number;
+    specialInstructions: string;
+    replacementPreferenceId: string;
+    selectedWeightRange: unknown;
+    serviceOptionId: CartServiceOptionId;
+    product: Product;
+  }>;
+}>;

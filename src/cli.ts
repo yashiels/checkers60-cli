@@ -55,6 +55,11 @@ Quick start:
   $ checkers60 slots          # Check delivery times
   $ checkers60 status         # Check your session
 
+Cart management:
+  $ checkers60 cart                    # View your cart
+  $ checkers60 cart suggestions        # See recommended items
+  $ checkers60 cart promos             # See cart promotions
+
 Exit codes:
   0  success
   1  runtime failure
@@ -214,6 +219,109 @@ Examples:
     wrap(async (opts: { json?: boolean }) => {
       const { trending } = await import("./commands/trending.js");
       await trending({ json: opts.json });
+    })
+  );
+
+// ── cart ───────────────────────────────────────────────────────────────
+const cart = program
+  .command("cart")
+  .description("View and manage your cart")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 cart                          # View your cart
+  $ checkers60 cart view --json
+  $ checkers60 cart add <product-id> --qty 2 # Dry-run: shows what would be added
+  $ checkers60 cart remove <item-id>         # Dry-run: shows what would be removed
+  $ checkers60 cart clear --confirm          # Dry-run: shows clear intent
+  $ checkers60 cart suggestions              # Have-you-forgotten products
+  $ checkers60 cart promos                   # Active cart promotions
+`
+  )
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { view } = await import("./commands/cart.js");
+      await view({ json: opts.json });
+    })
+  )
+  .option("--json", "Output JSON", false);
+
+cart
+  .command("view")
+  .description("Show current cart contents")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { view } = await import("./commands/cart.js");
+      await view({ json: opts.json });
+    })
+  );
+
+cart
+  .command("add <product-id>")
+  .description("Add a product to your cart (dry-run — not yet implemented)")
+  .option("--qty <n>", "Quantity to add", "1")
+  .option("--hyper", "Add to Hyper / one-day cart instead of Sixty60", false)
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(
+      async (
+        productId: string,
+        opts: { qty: string; hyper?: boolean; json?: boolean }
+      ) => {
+        const { add } = await import("./commands/cart.js");
+        await add(productId, {
+          qty: parseInt(opts.qty, 10),
+          hyper: opts.hyper,
+          json: opts.json,
+        });
+      }
+    )
+  );
+
+cart
+  .command("remove <item-id>")
+  .description("Remove a line item from your cart (dry-run — not yet implemented)")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (itemId: string, opts: { json?: boolean }) => {
+      const { remove } = await import("./commands/cart.js");
+      await remove(itemId, { json: opts.json });
+    })
+  );
+
+cart
+  .command("clear")
+  .description("Clear your cart (dry-run — not yet implemented)")
+  .option("--confirm", "Required to acknowledge cart-wide change", false)
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (opts: { confirm?: boolean; json?: boolean }) => {
+      const { clear } = await import("./commands/cart.js");
+      await clear({ confirm: opts.confirm, json: opts.json });
+    })
+  );
+
+cart
+  .command("suggestions")
+  .description("Show have-you-forgotten product suggestions")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { suggestions } = await import("./commands/cart.js");
+      await suggestions({ json: opts.json });
+    })
+  );
+
+cart
+  .command("promos")
+  .description("Show active promotions for your cart")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { promos } = await import("./commands/cart.js");
+      await promos({ json: opts.json });
     })
   );
 
