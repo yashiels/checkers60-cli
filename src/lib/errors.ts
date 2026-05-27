@@ -26,7 +26,7 @@ export function handleError(err: unknown): never {
     if (err.status === 401 || err.status === 403) {
       logError(`Authentication failed (HTTP ${err.status}).`);
       process.stderr.write(
-        `${chalk.dim("   Your session may have expired. Run: ")}${chalk.cyan("checkers60 login")}\n`
+        `${chalk.dim("   Your token may have expired. Run: ")}${chalk.cyan("checkers60 login")}${chalk.dim(", then ")}${chalk.cyan("checkers60 otp-verify <reference> <code>")}\n`
       );
     } else {
       logError(`Request failed: HTTP ${err.status} ${err.statusText}`);
@@ -41,7 +41,7 @@ export function handleError(err: unknown): never {
     if (/Not logged in/i.test(err.message)) {
       logError(err.message);
       process.stderr.write(
-        `${chalk.dim("   Run: ")}${chalk.cyan("checkers60 login")}\n`
+        `${chalk.dim("   Run: ")}${chalk.cyan("checkers60 login")}${chalk.dim(" to sign in.")}\n`
       );
       process.exit(EXIT_FAILURE);
     }

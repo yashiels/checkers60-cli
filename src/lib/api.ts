@@ -1,303 +1,536 @@
-import { loadSession } from "./session.js";
-import { getStoreContexts, type StoreContext } from "./config.js";
+import { randomBytes } from "node:crypto";
+import {
+  CONFIG,
+  storeIdList,
+  storeIdJsonArray,
+  type StoreContext,
+} from "./config.js";
+import { TokenManager } from "./credentials.js";
+import { request, APIError } from "./http.js";
 
-const BASE_URL = "https://www.checkers.co.za";
+export { APIError };
 
-export class CheckersAPI {
-  private cookies: string;
-  private storeContexts: StoreContext[];
+// ─── Types ─────────────────────────────────────────────────────────────────
 
-  constructor() {
-    const session = loadSession();
-    if (!session) {
-      throw new Error(
-        "Not logged in. Run `checkers60 login` first."
-      );
-    }
-    this.cookies = session.cookies
-      .map((c) => `${c.name}=${c.value}`)
-      .join("; ");
-    this.storeContexts = getStoreContexts();
-  }
-
-  private async fetch(
-    path: string,
-    options: RequestInit = {}
-  ): Promise<Response> {
-    const url = `${BASE_URL}${path}`;
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Cookie: this.cookies,
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-      Referer: `${BASE_URL}/`,
-      Origin: BASE_URL,
-      ...(options.headers as Record<string, string>),
-    };
-
-    const resp = await fetch(url, {
-      ...options,
-      headers,
-      redirect: "follow",
-    });
-
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
-      throw new APIError(resp.status, resp.statusText, body, path);
-    }
-
-    return resp;
-  }
-
-  async searchProducts(
-    query: string,
-    options: { page?: number; pageSize?: number; sortBy?: string } = {}
-  ): Promise<SearchResult> {
-    const { page = 1, pageSize = 20, sortBy = "Relevance" } = options;
-
-    if (this.storeContexts.length === 0) {
-      throw new Error(
-        "No store contexts configured. Run `checkers60 login` to set up your delivery address."
-      );
-    }
-
-    const resp = await this.fetch("/api/catalogue/get-products-filter", {
-      method: "POST",
-      body: JSON.stringify({
-        storeContexts: this.storeContexts,
-        search: query,
-        page,
-        pageSize,
-        sortBy,
-      }),
-    });
-
-    return resp.json() as Promise<SearchResult>;
-  }
-
-  async getFilterOptions(query: string): Promise<unknown> {
-    const resp = await this.fetch(
-      "/api/catalogue/get-products-filter-options",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          productFilterOptions: {
-            productListSource: { search: query },
-            storeContexts: this.storeContexts,
-          },
-        }),
-      }
-    );
-
-    return resp.json();
-  }
-
-  async getDeliverySlots(): Promise<unknown> {
-    const resp = await this.fetch("/api/stores/get-delivery-slots");
-    return resp.json();
-  }
-
-  async getFirstDeliverySlot(): Promise<unknown> {
-    const resp = await this.fetch("/api/stores/get-first-delivery-slots");
-    return resp.json();
-  }
-
-  async getPopularSearches(): Promise<unknown> {
-    const resp = await this.fetch("/api/catalogue/get-popular-searches");
-    return resp.json();
-  }
-
-  async getCategoryTree(): Promise<unknown> {
-    const resp = await this.fetch("/api/catalogue/get-category-tree");
-    return resp.json();
-  }
-
-  async fetchCart(cartIds: string[] = []): Promise<CartState> {
-    if (this.storeContexts.length === 0) {
-      throw new Error(
-        "No store contexts configured. Run `checkers60 login` to set up your delivery address."
-      );
-    }
-
-    const resp = await this.fetch("/api/cart/fetch-cart", {
-      method: "POST",
-      body: JSON.stringify({
-        params: {
-          cartIds,
-          storeContexts: this.storeContexts,
-        },
-      }),
-    });
-
-    return resp.json() as Promise<CartState>;
-  }
-
-  async updateCart(
-    payload: CartUpdatePayload,
-    isNaiveUpdate = false
-  ): Promise<CartState> {
-    const resp = await this.fetch("/api/cart/update-cart", {
-      method: "POST",
-      body: JSON.stringify({ payload, isNaiveUpdate }),
-    });
-
-    return resp.json() as Promise<CartState>;
-  }
-
-  async getCartSuggestions(
-    cartIds: string[],
-    storeIds: string[]
-  ): Promise<unknown> {
-    const resp = await this.fetch("/api/cart/get-have-you-forgotten-products", {
-      method: "POST",
-      body: JSON.stringify({
-        cartIds,
-        storeIds,
-        storeContexts: this.storeContexts,
-      }),
-    });
-
-    return resp.json();
-  }
-
-  async getCartPromotions(cartId: string): Promise<unknown> {
-    const resp = await this.fetch("/api/cart/get-cart-promotions", {
-      method: "POST",
-      body: JSON.stringify({
-        cartId,
-        storeContexts: this.storeContexts,
-      }),
-    });
-
-    return resp.json();
-  }
-
-  async getProduct(productId: string): Promise<Product> {
-    const resp = await this.fetch(
-      `/api/v1/products/${encodeURIComponent(productId)}`
-    );
-    return resp.json() as Promise<Product>;
-  }
-}
-
-export class APIError extends Error {
-  constructor(
-    public status: number,
-    public statusText: string,
-    public body: string,
-    public path: string
-  ) {
-    super(`API ${status} ${statusText} on ${path}: ${body.slice(0, 200)}`);
-    this.name = "APIError";
-  }
-}
-
-// Types based on observed API responses
-
-export interface SearchResult {
-  products?: Product[];
-  totalCount?: number;
-  page?: number;
-  pageSize?: number;
+/** Raw product as returned by the catalog API. */
+export interface RawCatalogProduct {
+  id: string;
+  name?: string;
+  displayName?: string;
+  priceWithoutDecimal?: number; // cents (5999 = R59.99)
+  priceFactor?: number;
+  storeId?: string;
+  serviceOptionId?: string;
+  imageId?: string;
+  stockOnHand?: number;
+  maxPerOrder?: number;
+  active?: boolean;
+  ranged?: boolean;
+  storeProductActive?: boolean;
+  promotions?: unknown[];
   [key: string]: unknown;
 }
 
+/** Normalized product used throughout the CLI. Prices are in cents. */
 export interface Product {
   id: string;
   name: string;
-  description?: string;
-  price?: number;
-  originalPrice?: number;
-  imageUrl?: string;
-  brand?: string;
-  category?: string;
-  inStock?: boolean;
+  price?: number; // cents
+  priceFactor?: number;
+  storeId?: string;
   serviceOptionId?: string;
-  promotions?: Promotion[];
-  isVitality?: boolean;
+  imageId?: string;
+  stock?: number;
+  maxPerOrder?: number;
+  active?: boolean;
+  promotions?: unknown[];
   [key: string]: unknown;
 }
-
-export interface Promotion {
-  type: string;
-  description: string;
-  savings?: number;
-  [key: string]: unknown;
-}
-
-// Cart types — prices are in CENTS (e.g. 2999 = R29.99), priceFactor is always 100.
-
-export type CartServiceOptionId = "sixty-min-delivery" | "one-day-delivery";
 
 export interface CartLineItem {
   id: string;
   productId: string;
-  storeId: string;
-  price: number;
-  previousPrice: number;
-  priceFactor: number;
   quantity: number;
-  specialInstructions: string;
-  replacementPreferenceId: string;
-  optionSelections?: unknown;
-  selectedWeightRange: unknown;
-  serviceOptionId: CartServiceOptionId;
-  hasAlcohol?: boolean;
-  requiresOver18?: boolean;
-  product: Product;
-  [key: string]: unknown;
-}
-
-export interface CartTotals {
-  productTotal: number;
-  discountTotal: number;
-  cartTotalAfterDiscounts: number;
-  [key: string]: unknown;
-}
-
-export interface ReplacementOption {
-  id: string;
-  code: string;
-  name: string;
-}
-
-export interface Cart {
-  id: string;
-  cartVersion?: number;
-  userId?: string;
-  serviceOptionId: CartServiceOptionId;
-  maximumCartSize?: number;
-  lineItems: CartLineItem[];
-  lineItemTotals: CartTotals;
-  deliveryAddress?: unknown;
-  deliveryAddressId?: string;
-  replacementOptions?: ReplacementOption[];
-  discountCodes?: string[];
-  cartSavings?: number;
+  price: number; // cents
+  priceFactor?: number;
+  previousPrice?: number;
+  storeId?: string;
+  status?: string;
+  serviceOptionId?: string;
   [key: string]: unknown;
 }
 
 export interface CartState {
-  sixtyMinCart?: Cart;
-  oneDayCart?: Cart;
+  carts: CartEnvelope[];
+  cartId: string | null;
+  cartVersion: number;
+  items: CartLineItem[];
+}
+
+interface CartEnvelope {
+  item?: {
+    id?: string;
+    cartVersion?: number;
+    serviceOptionId?: string;
+    lineItems?: CartLineItem[];
+  };
+}
+
+export interface CartItemInput {
+  productId: string;
+  quantity: number;
+  price: number; // cents
+  priceFactor?: number;
+  storeId?: string;
+  lineItemId?: string;
+}
+
+export interface Address {
+  _id?: string;
+  identifier?: string;
+  name?: string;
+  fullAddress?: string;
   [key: string]: unknown;
 }
 
-export type CartUpdatePayload = Array<{
-  id: string;
-  serviceOptionId: CartServiceOptionId;
-  lineItems: Array<{
-    id: string;
-    productId: string;
-    storeId: string;
-    price: number;
-    previousPrice: number;
-    priceFactor: number;
-    quantity: number;
-    specialInstructions: string;
-    replacementPreferenceId: string;
-    selectedWeightRange: unknown;
-    serviceOptionId: CartServiceOptionId;
-    product: Product;
-  }>;
-}>;
+export interface Card {
+  token?: string;
+  issuer?: string;
+  maskedCardNumber?: string;
+  expiryMonth?: string | number;
+  expiryYear?: string | number;
+  [key: string]: unknown;
+}
+
+export interface OrderTotal {
+  cartTotal?: number;
+  deliveryFee?: number;
+  totalOwing?: number;
+  creditApplied?: number;
+  requiresCardPayment?: boolean;
+  [key: string]: unknown;
+}
+
+export interface Order {
+  status?: { orderStatus?: string };
+  total?: OrderTotal;
+  [key: string]: unknown;
+}
+
+export interface OrderGroup {
+  reference?: string;
+  orders?: Order[];
+  [key: string]: unknown;
+}
+
+export interface UserProfile {
+  firstName?: string;
+  lastName?: string;
+  mobileNumber?: string;
+  email?: string;
+  [key: string]: unknown;
+}
+
+export interface DeliverySlot {
+  start?: number | string;
+  end?: number | string;
+  available?: boolean;
+  [key: string]: unknown;
+}
+
+export interface PreOrderResult {
+  slots: DeliverySlot[];
+  asap: boolean;
+  totals?: unknown;
+  raw?: unknown;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Generate a MongoDB-style ObjectId (matches the app's line-item ids). */
+export function objectId(): string {
+  const ts = Math.floor(Date.now() / 1000)
+    .toString(16)
+    .padStart(8, "0");
+  return ts + randomBytes(8).toString("hex");
+}
+
+/** Normalize a raw catalog product into the CLI's Product shape. */
+export function mapCatalogProduct(raw: RawCatalogProduct): Product {
+  return {
+    id: raw.id,
+    name: raw.name ?? raw.displayName ?? "",
+    price: raw.priceWithoutDecimal,
+    priceFactor: raw.priceFactor ?? 100,
+    storeId: raw.storeId,
+    serviceOptionId: raw.serviceOptionId,
+    imageId: raw.imageId,
+    stock: raw.stockOnHand,
+    maxPerOrder: raw.maxPerOrder,
+    active: Boolean(raw.active && raw.ranged && raw.storeProductActive),
+    promotions: Array.isArray(raw.promotions) ? raw.promotions : undefined,
+  };
+}
+
+// ─── Client ────────────────────────────────────────────────────────────────
+
+interface CatalogResponse {
+  products?: RawCatalogProduct[];
+}
+
+interface CartsResponse {
+  carts?: CartEnvelope[];
+}
+
+/**
+ * Checkers Sixty60 mobile-app API client. Auth is handled by an internal
+ * TokenManager; every call lazily resolves a valid user token (refreshing
+ * silently, never triggering OTP).
+ */
+export class CheckersAPI {
+  readonly tokens: TokenManager;
+
+  constructor(tokens?: TokenManager) {
+    this.tokens = tokens ?? new TokenManager();
+  }
+
+  /**
+   * Headers required by the sixty60 microservices (orders-api, auth,
+   * payments, catalog). All MITM-verified against app v2.0.114.
+   */
+  private sixty60Headers(
+    userToken: string,
+    stores?: StoreContext[]
+  ): Record<string, string> {
+    return {
+      authorization: `Bearer ${userToken}`,
+      channel: CONFIG.CHANNEL,
+      "channel-os": CONFIG.APP_VERSION,
+      "app-version": CONFIG.APP_VERSION,
+      appversion: CONFIG.APP_VERSION_CODE,
+      "istio-appversion": CONFIG.APP_VERSION_CODE,
+      "device-id": CONFIG.DEVICE_ID,
+      "customer-id": CONFIG.SHOPRITE_UUID,
+      userid: CONFIG.SIXTY60_USER_ID,
+      mobilenumber: CONFIG.MOBILE,
+      email: CONFIG.EMAIL,
+      "aws-cf-cd-storeid": storeIdList(stores), // comma-separated
+      storeids: storeIdJsonArray(stores), // JSON array
+      "istio-storeids": storeIdJsonArray(stores), // JSON array
+    };
+  }
+
+  private async headers(stores?: StoreContext[]): Promise<Record<string, string>> {
+    const user = await this.tokens.getUserToken();
+    return this.sixty60Headers(user, stores);
+  }
+
+  /** Throws a helpful error when the sixty60 user ID is required but unset. */
+  private requireUserId(): string {
+    if (!CONFIG.SIXTY60_USER_ID) {
+      throw new Error(
+        "Missing sixty60 user ID. Set CHECKERS60_USER_ID, or log in again to populate it."
+      );
+    }
+    return CONFIG.SIXTY60_USER_ID;
+  }
+
+  // ── Product search (catalog.sixty60.co.za) ──────────────────────────────
+
+  async searchProducts(
+    query: string,
+    opts: { page?: number; pageSize?: number; stores?: StoreContext[] } = {}
+  ): Promise<Product[]> {
+    const { page = 0, pageSize = 20, stores } = opts;
+    const headers = await this.headers(stores);
+
+    const body = {
+      filter: {
+        showAllDisplayVariants: false,
+        showNotRangedProducts: false,
+        productListSource: { search: query },
+        paginationOptions: { page, pageSize },
+        filterOptions: {
+          dealsOnly: false,
+          serviceOptions: [],
+          brandOptions: [],
+          departmentOptions: [],
+          facetOptions: [],
+          filterIds: [],
+        },
+      },
+      userContext: {
+        storeContexts: stores ?? CONFIG.DEFAULT_STORES,
+        userId: CONFIG.SIXTY60_USER_ID,
+        location: CONFIG.USER_LOCATION,
+      },
+    };
+
+    const t = Date.now();
+    const res = await request<CatalogResponse>(
+      "POST",
+      `${CONFIG.CATALOG_API}/api/v3/products/filter?isCarousel=false&includePromotions=true&promotionChannel=sixty60&isXtraSavings=true&isXtraSavingsMember=true&particularMemberBonusBuyIds=&t=${t}`,
+      { headers, form: body } // app quirk: form-urlencoded JSON body
+    );
+
+    return (res.data?.products ?? []).map(mapCatalogProduct);
+  }
+
+  /** Fetch raw product details by ID (one or many). */
+  async getProductDetails(productIds: string | string[]): Promise<RawCatalogProduct[]> {
+    const ids = Array.isArray(productIds) ? productIds : [productIds];
+    const headers = await this.headers();
+
+    const body = {
+      filter: {
+        showAllDisplayVariants: true,
+        showNotRangedProducts: true,
+        productListSource: { productIds: ids },
+        paginationOptions: { page: 0, pageSize: 50 },
+        filterOptions: { dealsOnly: false },
+      },
+      userContext: { storeContexts: CONFIG.DEFAULT_STORES },
+    };
+
+    const res = await request<CatalogResponse>(
+      "POST",
+      `${CONFIG.CATALOG_API}/api/v3/products/filter?isCarousel=false&includePromotions=true&promotionChannel=sixty60&isXtraSavings=true`,
+      { headers, json: body }
+    );
+    return res.data?.products ?? [];
+  }
+
+  // ── Cart (orders-api.sixty60.co.za) ─────────────────────────────────────
+
+  async getCart(stores?: StoreContext[]): Promise<CartState> {
+    const headers = await this.headers(stores);
+    const storeContexts = stores ?? CONFIG.DEFAULT_STORES;
+
+    const res = await request<CartsResponse>(
+      "POST",
+      `${CONFIG.ORDERS_API}/api/v2/carts/user?useProductMinInfoAnnotation=true`,
+      { headers, json: { storeContexts } }
+    );
+
+    const carts = res.data?.carts ?? [];
+    const primary =
+      carts.find((c) => c.item?.serviceOptionId === "sixty-min-delivery") ?? carts[0];
+    return {
+      carts,
+      cartId: primary?.item?.id ?? null,
+      cartVersion: primary?.item?.cartVersion ?? 0,
+      items: primary?.item?.lineItems ?? [],
+    };
+  }
+
+  /**
+   * Replace the cart's line items. The API ignores omitted items, so to remove
+   * something you must include it with quantity 0.
+   */
+  async updateCart(
+    cartId: string,
+    items: CartItemInput[],
+    addressId?: string
+  ): Promise<CartState> {
+    const headers = await this.headers();
+
+    const lineItems = items.map((item) => ({
+      id: item.lineItemId ?? objectId(),
+      status: "available",
+      price: item.price,
+      priceFactor: item.priceFactor ?? 100,
+      previousPrice: 0,
+      productId: item.productId,
+      instruction: "",
+      quantity: item.quantity,
+      specialInstruction: "",
+      storeId: item.storeId ?? CONFIG.DEFAULT_STORES[0].storeId,
+      replacementPreferenceId: "",
+      missionName: "",
+      missionType: "",
+      addToBasketType: "pdp_add_to_basket",
+      addToBasketJourney: "main_search_results",
+      serviceOptionId: "sixty-min-delivery",
+      isStockAvailable: true,
+      requiresOver18: false,
+      isSponsoredProduct: false,
+      hasAlcohol: false,
+      product: null,
+    }));
+
+    const body = {
+      carts: [{ id: cartId, serviceOptionId: "sixty-min-delivery", lineItems }],
+      deliveryAddressId: addressId ?? CONFIG.DEFAULT_ADDRESS_ID,
+      storeContexts: CONFIG.DEFAULT_STORES,
+    };
+
+    const res = await request<CartsResponse>(
+      "POST",
+      `${CONFIG.ORDERS_API}/api/v3/carts/update?useProductMinInfoAnnotation=true`,
+      { headers, form: body } // app quirk: form-urlencoded JSON body
+    );
+
+    if (!res.data?.carts) {
+      throw new Error(`Cart update failed: ${JSON.stringify(res.data)}`);
+    }
+    const cart = res.data.carts[0]?.item;
+    return {
+      carts: res.data.carts,
+      cartId: cart?.id ?? cartId,
+      cartVersion: cart?.cartVersion ?? 0,
+      items: cart?.lineItems ?? [],
+    };
+  }
+
+  /** Empty the cart by setting every line item's quantity to 0. */
+  async clearCart(cartId: string, addressId?: string): Promise<CartState> {
+    const { items } = await this.getCart();
+    if (items.length === 0) {
+      return { carts: [], cartId, cartVersion: 0, items: [] };
+    }
+    return this.updateCart(
+      cartId,
+      items.map((i) => ({
+        productId: i.productId,
+        quantity: 0,
+        price: i.price,
+        storeId: i.storeId,
+        lineItemId: i.id,
+      })),
+      addressId
+    );
+  }
+
+  // ── Addresses & cards (auth.sixty60.co.za) ──────────────────────────────
+
+  async getAddresses(): Promise<Address[]> {
+    const userId = this.requireUserId();
+    const headers = await this.headers();
+    const res = await request<{ items?: Address[] }>(
+      "GET",
+      `${CONFIG.AUTH_API}/customers/${userId}/addresses`,
+      { headers }
+    );
+    return res.data?.items ?? [];
+  }
+
+  async getPaymentCards(): Promise<Card[]> {
+    const userId = this.requireUserId();
+    const headers = await this.headers();
+    const res = await request<{ cards?: Card[] }>(
+      "GET",
+      `${CONFIG.AUTH_API}/customers/${userId}/cards`,
+      { headers }
+    );
+    return res.data?.cards ?? [];
+  }
+
+  // ── Orders (orders-api.sixty60.co.za) ───────────────────────────────────
+
+  async getOrders(activeOnly = true): Promise<OrderGroup[]> {
+    const headers = await this.headers();
+    const res = await request<{ orderGroups?: OrderGroup[] }>(
+      "GET",
+      `${CONFIG.ORDERS_API}/api/v1/orders/groups?activeOnly=${activeOnly}`,
+      { headers }
+    );
+    return res.data?.orderGroups ?? [];
+  }
+
+  // ── Delivery slots (via pre-order; orders-api) ──────────────────────────
+
+  /**
+   * The mobile app only surfaces delivery slots during pre-order, so slots are
+   * tied to the current cart's line items.
+   */
+  async getDeliverySlots(): Promise<PreOrderResult> {
+    const { cartId, cartVersion, items } = await this.getCart();
+    if (!cartId || items.length === 0) {
+      return { slots: [], asap: false };
+    }
+    const headers = await this.headers();
+
+    const body = {
+      cartsInfo: [
+        {
+          cartId,
+          cart: {
+            id: cartId,
+            cartVersion,
+            updatedOn: Date.now(),
+            lineItems: items.map((li) => ({
+              id: li.id,
+              productId: li.productId,
+              storeId: li.storeId ?? CONFIG.DEFAULT_STORES[0].storeId,
+              price: li.price,
+              previousPrice: li.previousPrice ?? 0,
+              priceFactor: li.priceFactor ?? 100,
+              quantity: li.quantity,
+              specialInstructions: "",
+              replacementPreferenceId: "",
+              optionSelections: null,
+              selectedWeightRange: null,
+              missionName: "",
+              missionType: "",
+              addToBasketType: "pdp_add_to_basket",
+              addToBasketJourney: "main_search_results",
+              isStockAvailable: true,
+              ranged: true,
+              isSponsoredProduct: false,
+              serviceOptionId: "sixty-min-delivery",
+              hasAlcohol: false,
+              requiresOver18: false,
+            })),
+          },
+        },
+      ],
+    };
+
+    const t = Date.now();
+    const res = await request<{
+      deliverySlots?: Record<string, { slots?: DeliverySlot[]; allowASAPDelivery?: boolean }>;
+      totals?: unknown;
+    }>("POST", `${CONFIG.ORDERS_API}/api/v3/orders/pre-order?t=${t}&screen=filter`, {
+      headers,
+      form: body, // app quirk: form-urlencoded JSON body
+    });
+
+    const slotData = res.data?.deliverySlots
+      ? Object.values(res.data.deliverySlots)[0]
+      : undefined;
+    return {
+      slots: slotData?.slots ?? [],
+      asap: slotData?.allowASAPDelivery ?? false,
+      totals: res.data?.totals,
+      raw: res.data,
+    };
+  }
+
+  // ── User profile (Shoprite DSL) ─────────────────────────────────────────
+
+  async getUserProfile(): Promise<UserProfile | undefined> {
+    const user = await this.tokens.getUserToken();
+    const res = await request<{ response?: { user?: UserProfile } }>(
+      "GET",
+      `${CONFIG.SHOPRITE_BASE}/users`,
+      {
+        headers: {
+          "x-api-key": CONFIG.X_API_KEY_USER,
+          access_token: user,
+          channel: CONFIG.CHANNEL,
+          "channel-os": CONFIG.APP_VERSION,
+          "app-version": CONFIG.APP_VERSION,
+          appversion: CONFIG.APP_VERSION_CODE,
+          "device-id": CONFIG.DEVICE_ID,
+          "customer-id": CONFIG.SHOPRITE_UUID,
+        },
+      }
+    );
+    return res.data?.response?.user;
+  }
+
+  /** Build a catalog image URL for a product image id. */
+  imageUrl(imageId: string, size = 156): string {
+    return `${CONFIG.CATALOG_API}/v2/files/${imageId}?width=${size}&height=${size}`;
+  }
+}

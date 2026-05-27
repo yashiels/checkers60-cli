@@ -1,47 +1,44 @@
 import chalk from "chalk";
 import Table from "cli-table3";
-import { CheckersAPI, type Product, type SearchResult } from "../lib/api.js";
+import { CheckersAPI, type Product } from "../lib/api.js";
+import { formatRand } from "../lib/format.js";
 import { startSpinner } from "../lib/output.js";
 
 export interface SearchOptions {
   page?: number;
   limit?: number;
   json?: boolean;
-  sort?: string;
 }
 
 export async function search(
   query: string,
   options: SearchOptions = {}
 ): Promise<void> {
-  const { page = 1, limit = 20, json = false, sort = "Relevance" } = options;
+  const { page = 1, limit = 20, json = false } = options;
 
   const spinner = json ? null : startSpinner(`Searching for "${query}"…`);
 
   const api = new CheckersAPI();
-  const result = await api.searchProducts(query, {
-    page,
+  // The catalog API is zero-indexed; the CLI exposes 1-indexed pages.
+  const products = await api.searchProducts(query, {
+    page: Math.max(0, page - 1),
     pageSize: limit,
-    sortBy: sort,
   });
-
-  if (json) {
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    return;
-  }
 
   spinner?.stop();
 
-  const products = extractProducts(result);
+  if (json) {
+    process.stdout.write(`${JSON.stringify(products, null, 2)}\n`);
+    return;
+  }
 
-  if (!products || products.length === 0) {
+  if (products.length === 0) {
     process.stdout.write(`${chalk.yellow(`No results for "${query}"`)}\n`);
     return;
   }
 
-  const total = (result as { totalCount?: number }).totalCount ?? products.length;
   process.stdout.write(
-    `${chalk.dim(`${total} results for "${query}" (page ${page})`)}\n\n`
+    `${chalk.dim(`${products.length} results for "${query}" (page ${page})`)}\n\n`
   );
 
   const table = new Table({
@@ -49,103 +46,51 @@ export async function search(
       chalk.dim("#"),
       chalk.bold("Product"),
       chalk.bold("Price"),
-      chalk.bold("Deal"),
+      chalk.bold("Stock"),
       chalk.dim("ID"),
     ],
-    colWidths: [5, 40, 12, 20, 15],
+    colWidths: [5, 42, 12, 9, 28],
     wordWrap: true,
     style: { head: [], border: [] },
   });
 
   products.forEach((product, i) => {
-    const price = formatPrice(product);
-    const deal = formatDeal(product);
-    const name = formatName(product);
-
     table.push([
       chalk.dim(`${(page - 1) * limit + i + 1}`),
-      name,
-      price,
-      deal,
-      chalk.dim(product.id?.slice(-8) ?? "—"),
+      formatName(product),
+      formatPrice(product),
+      formatStock(product),
+      chalk.dim(product.id ?? "—"),
     ]);
   });
 
   process.stdout.write(`${table.toString()}\n`);
 
-  if (total > page * limit) {
+  if (products.length === limit) {
     process.stdout.write(
       `\n${chalk.dim(`  Next page: checkers60 search "${query}" --page ${page + 1}`)}\n`
     );
   }
 }
 
-export function extractProducts(result: SearchResult): Product[] {
-  if (Array.isArray(result.products)) return result.products;
-  const items = (result as { items?: unknown }).items;
-  if (Array.isArray(items)) return items as Product[];
-  const nested = (result as { data?: { products?: unknown } }).data?.products;
-  if (Array.isArray(nested)) return nested as Product[];
-
-  // Walk one level deep looking for an array of objects with 'name'
-  for (const val of Object.values(result)) {
-    if (
-      Array.isArray(val) &&
-      val.length > 0 &&
-      typeof val[0] === "object" &&
-      val[0] !== null &&
-      "name" in (val[0] as object)
-    ) {
-      return val as Product[];
-    }
-  }
-
-  return [];
-}
-
+/** Format a product's price (cents) as Rand, marking out-of-stock items. */
 export function formatPrice(product: Product): string {
-  const price =
-    product.price ?? (product as { sellingPrice?: number }).sellingPrice;
-  if (price === undefined || price === null) return chalk.dim("—");
-
-  const original =
-    product.originalPrice ??
-    (product as { wasPrice?: number }).wasPrice ??
-    (product as { originalSellingPrice?: number }).originalSellingPrice;
-
-  if (original && original > price) {
-    return `${chalk.green(`R${price.toFixed(2)}`)} ${chalk.dim.strikethrough(
-      `R${original.toFixed(2)}`
-    )}`;
-  }
-
-  return `R${price.toFixed(2)}`;
+  if (product.price === undefined || product.price === null) return chalk.dim("—");
+  return formatRand(product.price);
 }
 
-function formatDeal(product: Product): string {
-  const promos =
-    product.promotions ??
-    (product as { promotion?: unknown }).promotion;
-  if (!promos) return chalk.dim("—");
-
-  if (Array.isArray(promos) && promos.length > 0) {
-    const first = promos[0] as { description?: string; type?: string };
-    return chalk.yellow(first.description ?? first.type ?? "Deal");
-  }
-  if (typeof promos === "object" && "description" in (promos as object)) {
-    return chalk.yellow((promos as { description: string }).description);
-  }
-
-  return chalk.dim("—");
-}
-
-function formatName(product: Product): string {
-  let name = product.name ?? "Unknown";
-  if (
-    product.isVitality ||
-    (product as { vitalityEligible?: boolean }).vitalityEligible
-  ) {
-    name = `💚 ${name}`;
+export function formatName(product: Product): string {
+  let name = product.name || "Unknown";
+  if (Array.isArray(product.promotions) && product.promotions.length > 0) {
+    name = `🏷️  ${name}`;
   }
   return name;
+}
+
+function formatStock(product: Product): string {
+  if (product.active === false) return chalk.red("out");
+  if (typeof product.stock === "number") {
+    return product.stock > 0 ? chalk.green(String(product.stock)) : chalk.red("0");
+  }
+  return chalk.dim("—");
 }

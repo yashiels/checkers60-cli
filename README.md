@@ -1,8 +1,8 @@
 # checkers60-cli
 
-CLI for [Checkers Sixty60](https://www.checkers.co.za) grocery delivery — search products, manage your cart, track orders, and reorder from the terminal.
+CLI for [Checkers Sixty60](https://www.sixty60.co.za) grocery delivery — search products, manage your cart, track orders, and reorder from the terminal.
 
-Built for humans and AI agents alike.
+Talks directly to the **Sixty60 mobile-app API** (reverse-engineered from the Android app), so there's no browser to drive. Built for humans and AI agents alike.
 
 ## Quick Start
 
@@ -12,11 +12,12 @@ git clone https://github.com/apex-skyner/checkers60-cli.git
 cd checkers60-cli
 npm install
 
-# Install Playwright browser
-npx playwright install chromium
+# Configure your account (see "Configuration" below)
+export CHECKERS60_MOBILE="+27821234567"
 
-# Log in (opens browser for phone + OTP auth)
-npx tsx src/cli.ts login
+# Log in (two-step OTP)
+npx tsx src/cli.ts login                  # sends an SMS, prints a reference
+npx tsx src/cli.ts otp-verify <ref> 1234  # verify the code from the SMS
 
 # Search for products
 npx tsx src/cli.ts search "milk"
@@ -25,64 +26,88 @@ npx tsx src/cli.ts search "milk"
 npx tsx src/cli.ts search "bread" --json
 ```
 
+## Configuration
+
+The CLI reads your account identity from environment variables and stores
+auth tokens at `~/.openclaw/credentials/checkers60.json`.
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `CHECKERS60_MOBILE` | to log in | Mobile number for OTP, e.g. `+27821234567` |
+| `CHECKERS60_USER_ID` | for cart/orders/etc. | Sixty60 internal user id |
+| `CHECKERS60_SHOPRITE_UUID` | recommended | Shoprite customer UUID |
+| `CHECKERS60_EMAIL` | recommended | Account email |
+| `CHECKERS60_ADDRESS_ID` | optional | Default delivery address id |
+| `CHECKERS60_STORES` | optional | JSON array of store contexts (defaults to Rondebosch) |
+| `CHECKERS60_DEVICE_ID` | optional | 16-char hex device id |
+
+After `otp-verify`, the Sixty60 user id is persisted automatically if it
+wasn't already set.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `login` | Log in via browser (phone + OTP). Saves session cookies locally. |
-| `logout` | Clear saved session and config. |
-| `status` | Show login status, delivery address, nearby stores. |
-| `search <query>` | Search products. Supports `--page`, `--limit`, `--sort`, `--json`. |
-| `slots` | Show available delivery time slots. |
-| `categories` | Browse product categories/departments. |
-| `trending` | Show popular/trending searches. |
-| `cart` / `cart view` | Show current cart contents (Sixty60 + Hyper sections, totals). |
-| `cart add <product-id> [--qty N] [--hyper]` | **Stub — dry-run only.** Looks up the product and shows what would be added. |
-| `cart remove <item-id>` | **Stub — dry-run only.** Shows what would be removed. |
-| `cart clear --confirm` | **Stub — dry-run only.** Shows clear intent. |
-| `cart suggestions` | Show have-you-forgotten product suggestions. |
-| `cart promos` | Show active promotions for your cart. |
+| `login` / `otp-trigger` | Send a login OTP to your phone (step 1). |
+| `otp-verify <ref> <code>` | Verify the OTP and save your session (step 2). |
+| `logout` | Clear saved tokens. |
+| `status` | Show login status, token expiry, and cart summary. |
+| `search <query>` | Search products. Supports `--page`, `--limit`, `--json`. |
+| `cart` | Show cart contents. |
+| `add <query\|id> [qty]` | Add a product to the cart by search term or product id. |
+| `remove <query\|id>` | Remove a product from the cart by name or product id. |
+| `clear` | Empty the cart. |
+| `addresses` | List delivery addresses. |
+| `cards` | List saved payment cards. |
+| `orders [--all]` | Show orders (active by default). |
+| `profile` | Show your user profile. |
+| `slots` | Show delivery slots for the current cart. |
+| `categories` | Not exposed by the mobile API (stub). |
+| `trending` | Not exposed by the mobile API (stub). |
+
+All commands support `--json` for structured output.
 
 ## How It Works
 
-Checkers Sixty60 uses OTP-based authentication (phone number + SMS code). The CLI handles this via Playwright:
+Checkers Sixty60 uses OTP-based authentication (phone number + SMS code). The
+CLI talks to the same backend the mobile app uses:
 
-1. `checkers60 login` opens a real Chromium browser
-2. You enter your phone number and OTP on the Checkers website
-3. The CLI captures your session cookies and store configuration
-4. Subsequent commands use these cookies to make direct API calls — fast, no browser needed
+1. A **BFF Cognito token** (24h) is fetched automatically — no auth needed.
+2. `checkers60 login` sends an OTP SMS and prints a reference.
+3. `checkers60 otp-verify <ref> <code>` exchanges the code for a user access
+   token + refresh token.
+4. The access token auto-refreshes via the refresh token; OTP is never
+   triggered automatically.
 
-Session data is stored in `~/.checkers60/`.
+Tokens are stored in `~/.openclaw/credentials/checkers60.json`.
 
 ## Agent Integration
 
 All commands support `--json` for structured output:
 
 ```sh
-checkers60 search "eggs" --json | jq '.products[0]'
+checkers60 search "eggs" --json | jq '.[0]'
+checkers60 cart --json
 checkers60 status --json
-checkers60 slots --json
 ```
 
 ## Roadmap
 
-- [x] Login (Playwright OTP flow)
+- [x] OTP login (two-step)
 - [x] Product search
+- [x] Cart management (add, remove, view, clear)
+- [x] Order history
+- [x] Addresses & cards
 - [x] Delivery slots
-- [x] Categories
-- [x] Cart view, suggestions, promotions
-- [ ] Cart mutations (add, remove, clear) — currently stub / dry-run only for safety
-- [ ] Order history
+- [ ] Checkout / place order
 - [ ] Rapid reorder
-- [ ] Deals/specials
 - [ ] OpenClaw skill integration
 
 ## Tech
 
 - TypeScript + Node.js (ESM)
-- [Playwright](https://playwright.dev/) for browser-based auth
-- [Commander](https://github.com/tj/commander.js) for CLI framework
-- Direct REST API calls to checkers.co.za (cookie-authenticated)
+- [Commander](https://github.com/tj/commander.js) for the CLI framework
+- Direct REST calls to the Sixty60 mobile-app API (token-authenticated)
 
 ## License
 
