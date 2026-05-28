@@ -1,0 +1,22 @@
+name: Ship
+on:
+  push:
+    branches: [never-trigger]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump type
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+permissions:
+  contents: write
+jobs:
+  release:
+    uses: ./.github/workflows/release-impl.yml
+    with:
+      bump: ${{ inputs.bump }}
+    secrets: inherit

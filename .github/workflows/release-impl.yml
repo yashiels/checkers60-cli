@@ -1,0 +1,181 @@
+name: Release Implementation
+on:
+  workflow_call:
+    inputs:
+      bump:
+        description: Version bump type
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Validate bump input
+        run: |
+          case "${{ inputs.bump }}" in
+            patch|minor|major) ;;
+            *) echo "Invalid bump value: '${{ inputs.bump }}'. Must be patch, minor, or major." >&2; exit 1 ;;
+          esac
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Bump version
+        id: version
+        run: |
+          MARKETING_VERSION=$(grep '^MARKETING_VERSION=' version.env | cut -d= -f2)
+          BUILD_NUMBER=$(grep '^BUILD_NUMBER=' version.env | cut -d= -f2)
+          IFS='.' read -r major minor patch <<< "$MARKETING_VERSION"
+
+          case "${{ inputs.bump }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+
+          NEW_VERSION="${major}.${minor}.${patch}"
+          NEW_BUILD=$((BUILD_NUMBER + 1))
+
+          echo "MARKETING_VERSION=${NEW_VERSION}" > version.env
+          echo "BUILD_NUMBER=${NEW_BUILD}" >> version.env
+
+          # Update package.json version
+          node -e "
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = '${NEW_VERSION}';
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build=${NEW_BUILD}" >> "$GITHUB_OUTPUT"
+          echo "Bumped to v${NEW_VERSION} (build ${NEW_BUILD})"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS arm64 binary
+        run: bun build --compile src/cli.ts --outfile checkers60
+
+      - name: Build Linux x64 binary
+        run: |
+          bun build --compile --target=bun-linux-x64 src/cli.ts --outfile checkers60-linux-x64
+          mv checkers60-linux-x64 checkers60-linux
+
+      - name: Create tarballs
+        id: tarballs
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # macOS arm64
+          MACOS_TAR="checkers60-v${VERSION}-darwin-arm64.tar.gz"
+          tar -czf "$MACOS_TAR" checkers60
+          MACOS_SHA=$(shasum -a 256 "$MACOS_TAR" | awk '{print $1}')
+
+          # Linux x64
+          LINUX_TAR="checkers60-v${VERSION}-linux-x64.tar.gz"
+          mv checkers60-linux checkers60
+          tar -czf "$LINUX_TAR" checkers60
+          LINUX_SHA=$(shasum -a 256 "$LINUX_TAR" | awk '{print $1}')
+
+          echo "macos_tar=${MACOS_TAR}" >> "$GITHUB_OUTPUT"
+          echo "macos_sha=${MACOS_SHA}" >> "$GITHUB_OUTPUT"
+          echo "linux_tar=${LINUX_TAR}" >> "$GITHUB_OUTPUT"
+          echo "linux_sha=${LINUX_SHA}" >> "$GITHUB_OUTPUT"
+          echo "macOS SHA-256: ${MACOS_SHA}"
+          echo "Linux SHA-256: ${LINUX_SHA}"
+
+      - name: Commit version bump
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add version.env package.json
+          git commit -m "chore(release): bump version to ${VERSION}"
+          git tag "v${VERSION}"
+          git push origin main --tags
+
+      - name: Create GitHub Release
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          MACOS_SHA="${{ steps.tarballs.outputs.macos_sha }}"
+          NOTES="### Install"$'\n'"brew install yashiels/tap/checkers60"$'\n\n'"Or download a tarball below."$'\n\n'"**macOS arm64 SHA-256:** ${MACOS_SHA}"
+          gh release create "v${VERSION}" \
+            "${{ steps.tarballs.outputs.macos_tar }}" \
+            "${{ steps.tarballs.outputs.linux_tar }}" \
+            --title "checkers60 v${VERSION}" \
+            --generate-notes \
+            --notes "$NOTES"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA="${{ steps.tarballs.outputs.macos_sha }}"
+
+          WORK=$(mktemp -d)
+          git clone "https://github.com/yashiels/homebrew-tap.git" "$WORK"
+          cd "$WORK"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          python3 -c "
+          v, s = '${VERSION}', '${SHA}'
+          formula = f'''class Checkers60 < Formula
+            desc \"CLI for Checkers Sixty60 grocery delivery\"
+            homepage \"https://github.com/yashiels/checkers60-cli\"
+            version \"{v}\"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url \"https://github.com/yashiels/checkers60-cli/releases/download/v{v}/checkers60-v{v}-darwin-arm64.tar.gz\"
+                sha256 \"{s}\"
+              end
+            end
+
+            def install
+              bin.install \"checkers60\"
+            end
+
+            test do
+              system bin/\"checkers60\", \"--version\"
+            end
+          end
+          '''
+          import textwrap
+          open('Formula/checkers60.rb', 'w').write(textwrap.dedent(formula).lstrip())
+          "
+
+          git add Formula/checkers60.rb
+          git commit -m "chore: bump checkers60 to v${VERSION}"
+          git remote set-url origin "https://x-access-token:${TAP_TOKEN}@github.com/yashiels/homebrew-tap.git"
+          git push origin main
+          echo "Homebrew tap updated to v${VERSION}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
+        with:
+          name: checkers60-v${{ steps.version.outputs.version }}-binaries
+          path: |
+            ${{ steps.tarballs.outputs.macos_tar }}
+            ${{ steps.tarballs.outputs.linux_tar }}
