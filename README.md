@@ -2,7 +2,6 @@
 
 CLI for Checkers Sixty60 grocery delivery. Talks directly to the Sixty60 mobile-app API (reverse-engineered from the Android APK) — no browser, no WebDriver, just fast terminal commands.
 
-> **Hero image coming soon** — screenshots are being prepared under `docs/assets/`.
 
 [![CI](https://github.com/yashiels/checkers60-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/yashiels/checkers60-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
