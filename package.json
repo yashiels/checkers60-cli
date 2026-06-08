@@ -1,6 +1,6 @@
 {
   "name": "checkers60-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CLI for Checkers Sixty60 grocery delivery — search, cart, orders, reorder",
   "type": "module",
   "bin": {
@@ -12,7 +12,14 @@
     "lint": "tsc --noEmit",
     "test": "vitest run --passWithNoTests"
   },
-  "keywords": ["checkers", "sixty60", "grocery", "delivery", "cli", "south-africa"],
+  "keywords": [
+    "checkers",
+    "sixty60",
+    "grocery",
+    "delivery",
+    "cli",
+    "south-africa"
+  ],
   "author": "Yashiel Sookdeo <yashiel@skyner.co.za>",
   "license": "MIT",
   "engines": {
