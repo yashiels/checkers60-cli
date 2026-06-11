@@ -1,0 +1,15 @@
+name: PR Agent
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+jobs:
+  review:
+    uses: skynergroup/.github/.github/workflows/pr-agent.yml@e5d65d05cdd00cdec39dff9fd3a7c32d5a41931b
+    secrets:
+      KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
