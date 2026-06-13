@@ -6,6 +6,8 @@ CLI for Checkers Sixty60 grocery delivery. Talks directly to the Sixty60 mobile-
 [![CI](https://github.com/yashiels/checkers60-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/yashiels/checkers60-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+![checkers60 demo](docs/assets/hero.svg)
+
 ---
 
 ## Install

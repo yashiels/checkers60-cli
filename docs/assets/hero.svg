@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 380" width="800" height="380">
+  <defs>
+    <style>
+      .bg { fill: #1e1e2e; }
+      .chrome { fill: #313244; }
+      .dot-r { fill: #f38ba8; }
+      .dot-y { fill: #f9e2af; }
+      .dot-g { fill: #a6e3a1; }
+      .title { fill: #cdd6f4; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 13px; }
+      .prompt { fill: #a6e3a1; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 14px; }
+      .cmd { fill: #cdd6f4; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 14px; }
+      .header { fill: #89b4fa; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 14px; }
+      .row { fill: #cdd6f4; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 14px; }
+      .dim { fill: #6c7086; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 14px; }
+      .price { fill: #a6e3a1; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 14px; }
+      .border { fill: #45475a; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 14px; }
+    </style>
+  </defs>
+  <!-- Window -->
+  <rect class="bg" width="800" height="380" rx="10"/>
+  <!-- Title bar -->
+  <rect class="chrome" width="800" height="36" rx="10"/>
+  <rect class="chrome" x="0" y="20" width="800" height="16"/>
+  <!-- Traffic lights -->
+  <circle class="dot-r" cx="20" cy="18" r="6"/>
+  <circle class="dot-y" cx="40" cy="18" r="6"/>
+  <circle class="dot-g" cx="60" cy="18" r="6"/>
+  <!-- Title -->
+  <text class="title" x="400" y="22" text-anchor="middle">checkers60</text>
+
+  <!-- Terminal content -->
+  <text class="prompt" x="20" y="70">$</text>
+  <text class="cmd" x="36" y="70"> checkers60 search "milk"</text>
+
+  <text class="border" x="20" y="100">  ┌──────┬─────────────────────────────┬──────────┐</text>
+  <text class="header" x="20" y="120">  │ SKU  │ Product                     │ Price    │</text>
+  <text class="border" x="20" y="140">  ├──────┼─────────────────────────────┼──────────┤</text>
+  <text class="row"    x="20" y="160">  │ 2841 │ Full Cream Milk 2L          │</text>
+  <text class="price"  x="537" y="160">R32.99</text>
+  <text class="row"    x="607" y="160">│</text>
+  <text class="row"    x="20" y="180">  │ 2842 │ Low Fat Milk 1L             │</text>
+  <text class="price"  x="537" y="180">R21.99</text>
+  <text class="row"    x="607" y="180">│</text>
+  <text class="row"    x="20" y="200">  │ 2843 │ Almond Milk Unsweetened 1L  │</text>
+  <text class="price"  x="537" y="200">R49.99</text>
+  <text class="row"    x="607" y="200">│</text>
+  <text class="row"    x="20" y="220">  │ 2844 │ Full Cream Milk 1L          │</text>
+  <text class="price"  x="537" y="220">R18.99</text>
+  <text class="row"    x="607" y="220">│</text>
+  <text class="border" x="20" y="240">  └──────┴─────────────────────────────┴──────────┘</text>
+
+  <text class="dim" x="20" y="270">  4 results found</text>
+
+  <text class="prompt" x="20" y="300">$</text>
+  <text class="cmd" x="36" y="300"> checkers60 add 2841 2</text>
+  <text class="row" x="20" y="320">  ✓ Added 2x Full Cream Milk 2L to cart (R65.98)</text>
+
+  <text class="prompt" x="20" y="350">$</text>
+  <text class="dim" x="36" y="350">█</text>
+</svg>
