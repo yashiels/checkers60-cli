@@ -4,3 +4,4 @@ dist/
 .env
 .checkers60/
 .worktrees/
+.worktrees
