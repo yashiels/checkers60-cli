@@ -36,6 +36,20 @@ The file should contain the token fields written by the OTP login flow (`otp-tri
 
 > **Safety note:** `otp-trigger` sends a live SMS. Never call it automatically or in a loop — only trigger it explicitly when the user asks to log in.
 
+## Headless / agent usage
+
+**Once logged in, everything is headless.** Shopping, cart, orders, slots — all read the saved tokens from the credentials file and need no interaction. Run them freely.
+
+**Login is the one interactive step, and an agent CANNOT complete it alone.** The OTP arrives by SMS to the user's phone, out of band — the agent has no way to read it. When `checkers60 status` shows a missing or expired token, the agent MUST:
+
+1. Run `checkers60 otp-trigger` (this fires one live SMS — run it exactly once).
+2. **Stop and ask the user to paste the code from the SMS.** Do not guess, retry, or re-trigger.
+3. Run `checkers60 otp-verify <ref> <code>` with the reference from step 1 and the code the user gives you.
+
+Use `--json` on `otp-trigger`/`otp-verify` when driving this programmatically so you can parse the `reference` and confirm `loggedIn`.
+
+> The `CHECKERS60_OTP_RELAY_URL` / `CHECKERS60_OTP_RELAY_TOKEN` env vars are reserved for a future SMS-to-HTTPS relay but are **not yet wired into the CLI** — there is no auto-fetch of the OTP today. Always fall back to asking the user.
+
 ## Product commands
 
 | Command | Description |
