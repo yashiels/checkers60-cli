@@ -73,10 +73,25 @@ describe("mapCatalogProduct", () => {
     expect(p.active).toBe(false);
   });
 
-  it("passes through a promotions array", () => {
-    const p = mapCatalogProduct({ id: "x", name: "Deal", promotions: [{ type: "save" }] });
-    expect(Array.isArray(p.promotions)).toBe(true);
-    expect(p.promotions).toHaveLength(1);
+  it("flags a promotion from isOnPromotion", () => {
+    const p = mapCatalogProduct({ id: "x", name: "Deal", isOnPromotion: true } as RawCatalogProduct);
+    expect(p.onPromotion).toBe(true);
+  });
+
+  it("flags a promotion from a discounted oldPrice", () => {
+    const p = mapCatalogProduct({
+      id: "x",
+      name: "Deal",
+      priceWithoutDecimal: 4999,
+      oldPrice: 6999,
+    } as RawCatalogProduct);
+    expect(p.onPromotion).toBe(true);
+    expect(p.oldPrice).toBe(6999);
+  });
+
+  it("leaves onPromotion unset for a normal product", () => {
+    const p = mapCatalogProduct({ id: "x", name: "Milk", priceWithoutDecimal: 4599 });
+    expect(p.onPromotion).toBeUndefined();
   });
 });
 
@@ -98,7 +113,7 @@ describe("formatName", () => {
   });
 
   it("tags products that carry a promotion", () => {
-    const out = formatName({ id: "x", name: "Cheese", promotions: [{ type: "save" }] });
+    const out = formatName({ id: "x", name: "Cheese", onPromotion: true });
     expect(out).toContain("Cheese");
     expect(out).toContain("🏷️");
   });

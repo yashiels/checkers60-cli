@@ -88,8 +88,8 @@ async function resolvePick(api: CheckersAPI, target: string): Promise<Pick> {
     };
   }
 
-  const results = await api.searchProducts(target, { pageSize: 5 });
-  const p = results[0];
+  const { products } = await api.searchProducts(target, { pageSize: 5 });
+  const p = products[0];
   if (!p) throw new Error(`No results for "${target}".`);
   if (p.price === undefined) {
     throw new Error(`"${p.name}" has no price and cannot be added.`);

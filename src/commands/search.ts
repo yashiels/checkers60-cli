@@ -20,7 +20,7 @@ export async function search(
 
   const api = new CheckersAPI();
   // The catalog API is zero-indexed; the CLI exposes 1-indexed pages.
-  const products = await api.searchProducts(query, {
+  const { products, total } = await api.searchProducts(query, {
     page: Math.max(0, page - 1),
     pageSize: limit,
   });
@@ -28,7 +28,7 @@ export async function search(
   spinner?.stop();
 
   if (json) {
-    process.stdout.write(`${JSON.stringify(products, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ total, products }, null, 2)}\n`);
     return;
   }
 
@@ -38,7 +38,7 @@ export async function search(
   }
 
   process.stdout.write(
-    `${chalk.dim(`${products.length} results for "${query}" (page ${page})`)}\n\n`
+    `${chalk.dim(`${total} results for "${query}" (page ${page})`)}\n\n`
   );
 
   const table = new Table({
@@ -80,11 +80,8 @@ export function formatPrice(product: Product): string {
 }
 
 export function formatName(product: Product): string {
-  let name = product.name || "Unknown";
-  if (Array.isArray(product.promotions) && product.promotions.length > 0) {
-    name = `🏷️  ${name}`;
-  }
-  return name;
+  const name = product.name || "Unknown";
+  return product.onPromotion ? `🏷️  ${name}` : name;
 }
 
 function formatStock(product: Product): string {

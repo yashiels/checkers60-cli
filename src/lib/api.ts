@@ -43,7 +43,10 @@ export interface Product {
   stock?: number;
   maxPerOrder?: number;
   active?: boolean;
-  promotions?: unknown[];
+  /** True when the product is on promotion (derived from the catalog signals). */
+  onPromotion?: boolean;
+  /** Pre-promotion price in cents, when discounted. */
+  oldPrice?: number;
   [key: string]: unknown;
 }
 
@@ -168,14 +171,40 @@ export function mapCatalogProduct(raw: RawCatalogProduct): Product {
     stock: raw.stockOnHand,
     maxPerOrder: raw.maxPerOrder,
     active: Boolean(raw.active && raw.ranged && raw.storeProductActive),
-    promotions: Array.isArray(raw.promotions) ? raw.promotions : undefined,
+    ...derivePromotion(raw),
   };
+}
+
+/**
+ * The catalog has no `promotions` array (the old code read a field that never
+ * exists, so the promo badge never showed). Promotion state comes from
+ * `isOnPromotion`, a discounted `oldPrice`, or membership in a bonus-buy deal.
+ */
+function derivePromotion(raw: RawCatalogProduct): {
+  onPromotion?: boolean;
+  oldPrice?: number;
+} {
+  const oldPrice = typeof raw.oldPrice === "number" ? raw.oldPrice : undefined;
+  const price = raw.priceWithoutDecimal;
+  const bonusBuyIds = raw.bonusBuyIds;
+  const onPromotion =
+    raw.isOnPromotion === true ||
+    (Array.isArray(bonusBuyIds) && bonusBuyIds.length > 0) ||
+    (oldPrice !== undefined && typeof price === "number" && oldPrice > price);
+  return { onPromotion: onPromotion || undefined, oldPrice };
 }
 
 // ─── Client ────────────────────────────────────────────────────────────────
 
 interface CatalogResponse {
   products?: RawCatalogProduct[];
+  totalCount?: number;
+}
+
+/** Search results plus the true total match count reported by the catalog. */
+export interface SearchResult {
+  products: Product[];
+  total: number;
 }
 
 interface CartsResponse {
@@ -240,7 +269,7 @@ export class CheckersAPI {
   async searchProducts(
     query: string,
     opts: { page?: number; pageSize?: number; stores?: StoreContext[] } = {}
-  ): Promise<Product[]> {
+  ): Promise<SearchResult> {
     const { page = 0, pageSize = 20, stores } = opts;
     const headers = await this.headers(stores);
 
@@ -270,10 +299,13 @@ export class CheckersAPI {
     const res = await request<CatalogResponse>(
       "POST",
       `${CONFIG.CATALOG_API}/api/v3/products/filter?isCarousel=false&includePromotions=true&promotionChannel=sixty60&isXtraSavings=true&isXtraSavingsMember=true&particularMemberBonusBuyIds=&t=${t}`,
-      { headers, form: body } // app quirk: form-urlencoded JSON body
+      // The catalog decodes a JSON body; the sibling getProductDetails call
+      // uses `json` too. Sending it form-urlencoded returns 400 and broke search.
+      { headers, json: body }
     );
 
-    return (res.data?.products ?? []).map(mapCatalogProduct);
+    const products = (res.data?.products ?? []).map(mapCatalogProduct);
+    return { products, total: res.data?.totalCount ?? products.length };
   }
 
   /** Fetch raw product details by ID (one or many). */
