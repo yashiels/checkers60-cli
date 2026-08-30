@@ -102,15 +102,38 @@ jobs:
           echo "macOS SHA-256: ${MACOS_SHA}"
           echo "Linux SHA-256: ${LINUX_SHA}"
 
-      - name: Commit version bump
+      - name: Commit version bump (verified, via GitHub API)
+        env:
+          # GITHUB_TOKEN is the GitHub Actions integration and cannot bypass the
+          # main-branch ruleset (PR-required + signed commits). A bypass-user PAT
+          # can, and createCommitOnBranch produces a GitHub-signed ("Verified")
+          # commit that also satisfies require-signed-commits. The release tag is
+          # created afterwards by the "Create GitHub Release" step.
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add version.env package.json
-          git commit -m "chore(release): bump version to ${VERSION}"
-          git tag "v${VERSION}"
-          git push origin main --tags
+          BRANCH="${GITHUB_REF_NAME}"
+          HEAD_OID=$(git rev-parse HEAD)
+
+          additions=$(jq -n \
+            --arg p1 version.env  --arg c1 "$(base64 < version.env | tr -d '\n')" \
+            --arg p2 package.json --arg c2 "$(base64 < package.json | tr -d '\n')" \
+            '[{path:$p1,contents:$c1},{path:$p2,contents:$c2}]')
+
+          jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg branch "$BRANCH" \
+            --arg oid "$HEAD_OID" \
+            --arg headline "chore(release): bump version to ${VERSION}" \
+            --argjson additions "$additions" \
+            '{query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }",
+              variables: {input: {
+                branch: {repositoryNameWithOwner: $repo, branchName: $branch},
+                expectedHeadOid: $oid,
+                message: {headline: $headline},
+                fileChanges: {additions: $additions}
+              }}}' \
+            | gh api graphql --input -
 
       - name: Create GitHub Release
         run: |
