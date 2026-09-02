@@ -50,6 +50,37 @@ Use `--json` on `otp-trigger`/`otp-verify` when driving this programmatically so
 
 > The `CHECKERS60_OTP_RELAY_URL` / `CHECKERS60_OTP_RELAY_TOKEN` env vars are reserved for a future SMS-to-HTTPS relay but are **not yet wired into the CLI** — there is no auto-fetch of the OTP today. Always fall back to asking the user.
 
+## JSON output & exit codes (headless)
+
+Every command accepts `--json` for machine-readable output. You can also set it
+globally for a whole session with the `CHECKERS60_JSON` environment variable
+(any truthy value, e.g. `CHECKERS60_JSON=1`); `--json` on the command line ORs
+with it. In JSON mode all spinners and incidental log lines are suppressed, so
+stdout carries **only** the JSON payload.
+
+**Errors are JSON too.** On failure in JSON mode the CLI writes exactly one
+object to **stdout** and exits non-zero:
+
+```json
+{"error": "Authentication failed (HTTP 401).", "code": 3, "status": 401}
+```
+
+`status` is present only for server responses. The `error` string is always a
+clean summary — it never contains the raw API response body.
+
+Exit codes are stable and safe to branch on:
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | generic runtime failure |
+| `2` | invalid usage (unknown command/option, missing argument) |
+| `3` | authentication (not logged in, HTTP 401/403) |
+| `4` | network (timeout, DNS failure, connection reset) |
+
+A `code: 3` from any command is the signal to run the OTP login flow above.
+`--help` and `--version` always print normally, even in JSON mode.
+
 ## Product commands
 
 | Command | Description |
@@ -106,4 +137,4 @@ checkers60 orders
 
 - All commands require valid credentials in `~/.openclaw/credentials/checkers60.json`. Run the OTP flow if `checkers60 status` shows an expired or missing token.
 - `otp-trigger` must only be invoked when the user explicitly asks to log in. Do not auto-trigger it in scripts or on credential errors.
-- The CLI exits non-zero on API errors and prints a human-readable error message to stderr.
+- The CLI exits non-zero on API errors. In human mode the message goes to stderr; in `--json` mode a single `{"error","code","status?"}` object goes to stdout. See the exit-code table above.

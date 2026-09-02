@@ -5,12 +5,14 @@ export interface GlobalFlags {
   noColor?: boolean;
   quiet?: boolean;
   verbose?: boolean;
+  json?: boolean;
 }
 
 let state: Required<GlobalFlags> = {
   noColor: false,
   quiet: false,
   verbose: false,
+  json: false,
 };
 
 export function configureOutput(flags: GlobalFlags = {}): void {
@@ -23,6 +25,9 @@ export function configureOutput(flags: GlobalFlags = {}): void {
     noColor,
     quiet: flags.quiet === true,
     verbose: flags.verbose === true,
+    // json is sticky: once enabled (e.g. detected before commander parse) it
+    // stays on unless the caller explicitly passes a new value.
+    json: flags.json ?? state.json,
   };
 
   if (noColor) {
@@ -38,22 +43,27 @@ export function isVerbose(): boolean {
   return state.verbose;
 }
 
+export function isJson(): boolean {
+  return state.json;
+}
+
 export function isInteractive(): boolean {
-  return process.stdout.isTTY === true && !state.quiet;
+  return process.stdout.isTTY === true && !state.quiet && !state.json;
 }
 
 export function startSpinner(text: string): Ora | null {
-  if (!isInteractive()) return null;
+  // No spinners in JSON mode or when non-interactive.
+  if (state.json || !isInteractive()) return null;
   return ora({ text, stream: process.stderr }).start();
 }
 
 export function logInfo(msg: string): void {
-  if (state.quiet) return;
+  if (state.quiet || state.json) return;
   process.stderr.write(`${msg}\n`);
 }
 
 export function logVerbose(msg: string): void {
-  if (!state.verbose) return;
+  if (!state.verbose || state.json) return;
   process.stderr.write(`${chalk.dim("[debug]")} ${msg}\n`);
 }
 
@@ -62,6 +72,6 @@ export function logError(msg: string): void {
 }
 
 export function logWarn(msg: string): void {
-  if (state.quiet) return;
+  if (state.quiet || state.json) return;
   process.stderr.write(`${chalk.yellow(msg)}\n`);
 }

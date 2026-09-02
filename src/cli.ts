@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-import { Command, Option } from "commander";
+import { Command, CommanderError, Option } from "commander";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { configureOutput } from "./lib/output.js";
-import { wrap, EXIT_USAGE } from "./lib/errors.js";
+import { configureOutput, isJson } from "./lib/output.js";
+import { wrap, handleError, UsageError, EXIT_USAGE } from "./lib/errors.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -17,6 +17,31 @@ try {
   version = pkg.version;
 } catch {}
 
+/** Detect JSON mode from argv (`--json` anywhere) or `CHECKERS60_JSON` env. */
+function detectJson(argv: readonly string[], env: NodeJS.ProcessEnv): boolean {
+  if (argv.includes("--json")) return true;
+  const v = env.CHECKERS60_JSON;
+  return (
+    v !== undefined && v !== "" && v !== "0" && v.toLowerCase() !== "false"
+  );
+}
+
+// Resolve JSON mode BEFORE commander parses, so usage errors are JSON too and
+// commander's own output is buffered/suppressed appropriately.
+const jsonMode = detectJson(process.argv, process.env);
+configureOutput({ json: jsonMode });
+
+// In JSON mode we buffer commander's own writes (help/version/error text) so it
+// can never leak before our single JSON envelope. On help/version success we
+// flush; on any usage failure we discard and emit exactly one envelope.
+const outBuffer: string[] = [];
+const errBuffer: string[] = [];
+
+/** Merge the global/env JSON flag with a per-command `--json` (explicit OR). */
+function mergeJson(opts?: { json?: boolean }): boolean {
+  return isJson() || Boolean(opts?.json);
+}
+
 const program = new Command()
   .name("checkers60")
   .description("CLI for Checkers Sixty60 grocery delivery (mobile-app API)")
@@ -24,27 +49,36 @@ const program = new Command()
   .addOption(new Option("--no-color", "disable colored output (respects NO_COLOR)"))
   .addOption(new Option("-q, --quiet", "suppress non-essential output").default(false))
   .addOption(new Option("-v, --verbose", "show extra debug info").default(false))
+  .addOption(new Option("--json", "output machine-readable JSON").default(false))
   .hook("preAction", (thisCommand) => {
     const opts = thisCommand.opts<{
       color?: boolean;
       quiet?: boolean;
       verbose?: boolean;
+      json?: boolean;
     }>();
     configureOutput({
       // Commander negates --no-color into opts.color === false
       noColor: opts.color === false,
       quiet: opts.quiet,
       verbose: opts.verbose,
+      json: isJson() || Boolean(opts.json),
     });
   })
   .showHelpAfterError()
-  .exitOverride((err) => {
-    // Invalid usage → exit 2 per clig.dev
-    if (err.code === "commander.unknownCommand" || err.code === "commander.unknownOption") {
-      process.exit(EXIT_USAGE);
-    }
-    process.exit(err.exitCode ?? 0);
-  });
+  .configureOutput({
+    writeOut: (str) => {
+      if (isJson()) outBuffer.push(str);
+      else process.stdout.write(str);
+    },
+    writeErr: (str) => {
+      if (isJson()) errBuffer.push(str);
+      else process.stderr.write(str);
+    },
+  })
+  // Throw commander errors so the single try/catch around parseAsync owns exit
+  // codes and (in JSON mode) the error envelope. Never process.exit here.
+  .exitOverride();
 
 program.addHelpText(
   "after",
@@ -69,10 +103,16 @@ Cart management:
   $ checkers60 cart suggestions        # See recommended items
   $ checkers60 cart promos             # See cart promotions
 
+Global flags:
+  --json  Emit machine-readable JSON (also via CHECKERS60_JSON=1). Errors become
+          a single {"error","code","status?"} object on stdout.
+
 Exit codes:
   0  success
   1  runtime failure
   2  invalid usage
+  3  authentication (not logged in / 401 / 403)
+  4  network (timeout, DNS, connection reset)
 `
 );
 
@@ -93,7 +133,7 @@ Examples:
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { otpTrigger } = await import("./commands/login.js");
-      await otpTrigger({ json: opts.json });
+      await otpTrigger({ json: mergeJson(opts) });
     })
   );
 
@@ -112,7 +152,7 @@ Examples:
   .action(
     wrap(async (reference: string, code: string, opts: { json?: boolean }) => {
       const { otpVerify } = await import("./commands/login.js");
-      await otpVerify(reference, code, { json: opts.json });
+      await otpVerify(reference, code, { json: mergeJson(opts) });
     })
   );
 
@@ -135,7 +175,7 @@ program
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { status } = await import("./commands/status.js");
-      await status({ json: opts.json });
+      await status({ json: mergeJson(opts) });
     })
   );
 
@@ -160,7 +200,7 @@ Examples:
       await search(query, {
         page: parseInt(opts.page, 10),
         limit: parseInt(opts.limit, 10),
-        json: opts.json,
+        json: mergeJson(opts),
       });
     })
   );
@@ -173,7 +213,7 @@ program
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { cart } = await import("./commands/cart.js");
-      await cart({ json: opts.json });
+      await cart({ json: mergeJson(opts) });
     })
   );
 
@@ -193,7 +233,7 @@ Examples:
   .action(
     wrap(async (target: string, qty: string | undefined, opts: { json?: boolean }) => {
       const { add } = await import("./commands/add.js");
-      await add(target, qty ? parseInt(qty, 10) : 1, { json: opts.json });
+      await add(target, qty ? parseInt(qty, 10) : 1, { json: mergeJson(opts) });
     })
   );
 
@@ -213,7 +253,7 @@ Examples:
   .action(
     wrap(async (target: string, opts: { json?: boolean }) => {
       const { remove } = await import("./commands/remove.js");
-      await remove(target, { json: opts.json });
+      await remove(target, { json: mergeJson(opts) });
     })
   );
 
@@ -225,7 +265,7 @@ program
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { clear } = await import("./commands/clear.js");
-      await clear({ json: opts.json });
+      await clear({ json: mergeJson(opts) });
     })
   );
 
@@ -237,7 +277,7 @@ program
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { addresses } = await import("./commands/addresses.js");
-      await addresses({ json: opts.json });
+      await addresses({ json: mergeJson(opts) });
     })
   );
 
@@ -249,7 +289,7 @@ program
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { cards } = await import("./commands/cards.js");
-      await cards({ json: opts.json });
+      await cards({ json: mergeJson(opts) });
     })
   );
 
@@ -270,7 +310,7 @@ Examples:
   .action(
     wrap(async (opts: { all?: boolean; json?: boolean }) => {
       const { orders } = await import("./commands/orders.js");
-      await orders({ all: opts.all, json: opts.json });
+      await orders({ all: opts.all, json: mergeJson(opts) });
     })
   );
 
@@ -282,7 +322,7 @@ program
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { profile } = await import("./commands/profile.js");
-      await profile({ json: opts.json });
+      await profile({ json: mergeJson(opts) });
     })
   );
 
@@ -294,7 +334,7 @@ program
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { slots } = await import("./commands/slots.js");
-      await slots({ json: opts.json });
+      await slots({ json: mergeJson(opts) });
     })
   );
 
@@ -306,7 +346,7 @@ program
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { categories } = await import("./commands/categories.js");
-      await categories({ json: opts.json });
+      await categories({ json: mergeJson(opts) });
     })
   );
 
@@ -318,12 +358,50 @@ program
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { trending } = await import("./commands/trending.js");
-      await trending({ json: opts.json });
+      await trending({ json: mergeJson(opts) });
     })
   );
 
-program.parseAsync().catch(() => {
-  // wrap()/exitOverride() already handle exit codes; this guards
-  // against unexpected commander errors.
-  process.exit(1);
-});
+function flushBuffers(): void {
+  if (outBuffer.length) {
+    process.stdout.write(outBuffer.join(""));
+    outBuffer.length = 0;
+  }
+  if (errBuffer.length) {
+    process.stderr.write(errBuffer.join(""));
+    errBuffer.length = 0;
+  }
+}
+
+function discardBuffers(): void {
+  outBuffer.length = 0;
+  errBuffer.length = 0;
+}
+
+// Single entry point: route EVERY error through handleError, which sets
+// process.exitCode and never calls process.exit — so buffered stdout flushes.
+try {
+  await program.parseAsync();
+} catch (err) {
+  if (err instanceof CommanderError) {
+    if (err.exitCode === 0) {
+      // Successful --help / --version: not an error. Flush any buffered
+      // help/version text (buffered only in JSON mode) and exit 0.
+      flushBuffers();
+      process.exitCode = 0;
+    } else {
+      // Any commander usage failure (unknown command/option, missing
+      // argument, …) → discard buffered text, exit 2. In JSON mode emit
+      // exactly one envelope; in human mode commander already wrote the
+      // message straight to stderr.
+      discardBuffers();
+      if (isJson()) {
+        handleError(new UsageError(err.message.replace(/^error:\s*/i, "")));
+      } else {
+        process.exitCode = EXIT_USAGE;
+      }
+    }
+  } else {
+    handleError(err);
+  }
+}
