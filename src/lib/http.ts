@@ -12,6 +12,46 @@ export class APIError extends Error {
   }
 }
 
+/**
+ * Thrown when the per-call timeout elapses. Distinct from {@link ExternalAbortError}
+ * so a later retry policy can treat a timeout as retryable while an external abort
+ * stays terminal.
+ */
+export class TimeoutError extends Error {
+  readonly timeout = true;
+  constructor(
+    public timeoutMs: number,
+    method: string,
+    redactedUrl: string
+  ) {
+    super(`Request timed out after ${timeoutMs}ms: ${method} ${redactedUrl}`);
+    this.name = "TimeoutError";
+  }
+}
+
+/**
+ * Thrown when an external {@link AbortSignal} passed via `options.signal` aborts
+ * the call. Terminal: a later retry policy must never retry it and must never
+ * relabel it as a timeout. Carries `external === true` as the discriminator.
+ */
+export class ExternalAbortError extends Error {
+  readonly external = true;
+  constructor(method: string, redactedUrl: string) {
+    super(`Request aborted: ${method} ${redactedUrl}`);
+    this.name = "AbortError";
+  }
+}
+
+/** Origin + pathname only — strips query string (and any refresh token in it). */
+export function redactUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return url.split("?")[0];
+  }
+}
+
 export interface RequestOptions {
   headers?: Record<string, string>;
   /** JSON body — serialized with JSON.stringify and `application/json`. */
@@ -23,6 +63,11 @@ export interface RequestOptions {
    */
   form?: unknown;
   timeoutMs?: number;
+  /**
+   * External abort signal. Combined with the per-call timeout into one effective
+   * abort; if it fires, the call rejects with {@link ExternalAbortError} (terminal).
+   */
+  signal?: AbortSignal;
 }
 
 export interface ApiResponse<T> {
@@ -40,7 +85,7 @@ export async function request<T = unknown>(
   url: string,
   options: RequestOptions = {}
 ): Promise<ApiResponse<T>> {
-  const { headers = {}, json, form, timeoutMs = 30_000 } = options;
+  const { headers = {}, json, form, timeoutMs = 30_000, signal } = options;
 
   const finalHeaders: Record<string, string> = {
     accept: "application/json, text/plain, */*",
@@ -60,38 +105,60 @@ export async function request<T = unknown>(
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
 
-  let resp: Response;
+  let onExternalAbort: (() => void) | undefined;
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort();
+    } else {
+      onExternalAbort = () => controller.abort();
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+  }
+
   try {
-    resp = await fetch(url, {
+    // The abort must stay active THROUGH the body read: fetch() and resp.text()
+    // both run inside the timed/abortable window so a hung body read can be
+    // cancelled by the timeout or the external signal.
+    const resp = await fetch(url, {
       method,
       headers: finalHeaders,
       body,
       signal: controller.signal,
       redirect: "follow",
     });
+
+    const text = await resp.text();
+    let data: unknown;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+
+    if (!resp.ok) {
+      throw new APIError(resp.status, resp.statusText, text, new URL(url).pathname);
+    }
+
+    return { status: resp.status, headers: resp.headers, data: data as T };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`Request timed out after ${timeoutMs}ms: ${method} ${url}`);
+      // External abort takes precedence and is terminal — never relabel it as a timeout.
+      if (signal?.aborted) {
+        throw new ExternalAbortError(method, redactUrl(url));
+      }
+      if (timedOut) {
+        throw new TimeoutError(timeoutMs, method, redactUrl(url));
+      }
     }
     throw err;
   } finally {
     clearTimeout(timer);
+    if (onExternalAbort) signal?.removeEventListener("abort", onExternalAbort);
   }
-
-  const text = await resp.text();
-  let data: unknown;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = text;
-  }
-
-  if (!resp.ok) {
-    const path = new URL(url).pathname;
-    throw new APIError(resp.status, resp.statusText, text, path);
-  }
-
-  return { status: resp.status, headers: resp.headers, data: data as T };
 }
