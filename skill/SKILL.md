@@ -86,14 +86,27 @@ A `code: 3` from any command is the signal to run the OTP login flow above.
 | Command | Description |
 |---|---|
 | `checkers60 search <query>` | Search for products by name or keyword |
-| `checkers60 categories` | Browse top-level product categories |
-| `checkers60 trending` | List currently trending products |
+| `checkers60 deals <query>` | List bonus-buy deals ("buy N & save X") for a search term |
+| `checkers60 show <id>` | Product detail plus any bonus-buy deals it belongs to |
+| `checkers60 categories` | Not wired up yet — category endpoint host is still TBD; use `search` |
+| `checkers60 trending` | Deprecated — the mobile API has no trending endpoint; use `search` |
+
+### Bonus-buy deals
+
+Deals are "buy these together and save" promotions (e.g. *Buy 2 & Save 20%*). The
+buy-quantity threshold and the saving live only in each deal's human `title`/
+`description` text — there is **no clean numeric threshold field** — so the CLI
+never fabricates "X of N" progress. `deals` and `show --json` return the
+normalized deal (`title`, `description`, `validUntil`, `membersOnly`,
+`memberProductIds`, raw `discountTypeCode`/`offerTypeCode`). `membersOnly: true`
+means Xtra-Savings members only.
 
 ## Cart commands
 
 | Command | Description |
 |---|---|
 | `checkers60 cart` | Show the current cart contents and total |
+| `checkers60 cart --deals` | Show which cart items qualify for which bonus-buy deal (membership only, no count) |
 | `checkers60 add <target> [qty]` | Add a product to the cart; `target` is a product ID or search term; `qty` defaults to 1 |
 | `checkers60 remove <target>` | Remove a product from the cart by ID or search term |
 | `checkers60 clear` | Empty the entire cart |

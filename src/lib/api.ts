@@ -8,8 +8,14 @@ import {
 import { TokenManager } from "./credentials.js";
 import { getDeviceId } from "./runtime.js";
 import { request, APIError } from "./http.js";
+import {
+  normalizeBonusBuys,
+  type BonusBuy,
+  type RawBonusBuy,
+} from "./promotions.js";
 
 export { APIError };
+export type { BonusBuy } from "./promotions.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -48,6 +54,12 @@ export interface Product {
   onPromotion?: boolean;
   /** Pre-promotion price in cents, when discounted. */
   oldPrice?: number;
+  /** Ids of the bonus-buy deals this product qualifies for. */
+  bonusBuyIds?: string[];
+  /** Raw discount amount reported by the catalog (cents), when present. */
+  discount?: number;
+  /** Raw `isOnPromotion` flag from the catalog, preserved verbatim. */
+  isOnPromotion?: boolean;
   [key: string]: unknown;
 }
 
@@ -172,6 +184,12 @@ export function mapCatalogProduct(raw: RawCatalogProduct): Product {
     stock: raw.stockOnHand,
     maxPerOrder: raw.maxPerOrder,
     active: Boolean(raw.active && raw.ranged && raw.storeProductActive),
+    bonusBuyIds: Array.isArray(raw.bonusBuyIds)
+      ? (raw.bonusBuyIds as string[])
+      : undefined,
+    discount: typeof raw.discount === "number" ? raw.discount : undefined,
+    isOnPromotion:
+      typeof raw.isOnPromotion === "boolean" ? raw.isOnPromotion : undefined,
     ...derivePromotion(raw),
   };
 }
@@ -200,12 +218,27 @@ function derivePromotion(raw: RawCatalogProduct): {
 interface CatalogResponse {
   products?: RawCatalogProduct[];
   totalCount?: number;
+  bonusBuys?: Record<string, RawBonusBuy>;
 }
 
 /** Search results plus the true total match count reported by the catalog. */
 export interface SearchResult {
   products: Product[];
   total: number;
+  /** Bonus-buy deals attached to this result set (may be empty). */
+  deals: BonusBuy[];
+}
+
+/** Deals for a query, plus any products the deals search returned. */
+export interface DealsResult {
+  deals: BonusBuy[];
+  products: Product[];
+}
+
+/** A raw product together with the deals it qualifies for. */
+export interface ProductWithDeals {
+  raw?: RawCatalogProduct;
+  deals: BonusBuy[];
 }
 
 interface CartsResponse {
@@ -267,11 +300,20 @@ export class CheckersAPI {
 
   // ── Product search (catalog.sixty60.co.za) ──────────────────────────────
 
-  async searchProducts(
+  /**
+   * Shared catalog `products/filter` search by keyword. Returns the raw catalog
+   * envelope (products + totalCount + bonusBuys) so callers can normalize.
+   */
+  private async filterSearch(
     query: string,
-    opts: { page?: number; pageSize?: number; stores?: StoreContext[] } = {}
-  ): Promise<SearchResult> {
-    const { page = 0, pageSize = 20, stores } = opts;
+    opts: {
+      page?: number;
+      pageSize?: number;
+      stores?: StoreContext[];
+      dealsOnly?: boolean;
+    } = {}
+  ): Promise<CatalogResponse> {
+    const { page = 0, pageSize = 20, stores, dealsOnly = false } = opts;
     const headers = await this.headers(stores);
 
     const body = {
@@ -281,7 +323,7 @@ export class CheckersAPI {
         productListSource: { search: query },
         paginationOptions: { page, pageSize },
         filterOptions: {
-          dealsOnly: false,
+          dealsOnly,
           serviceOptions: [],
           brandOptions: [],
           departmentOptions: [],
@@ -304,14 +346,46 @@ export class CheckersAPI {
       // uses `json` too. Sending it form-urlencoded returns 400 and broke search.
       { headers, json: body, retry: "safe" }
     );
-
-    const products = (res.data?.products ?? []).map(mapCatalogProduct);
-    return { products, total: res.data?.totalCount ?? products.length };
+    return res.data ?? {};
   }
 
-  /** Fetch raw product details by ID (one or many). */
-  async getProductDetails(productIds: string | string[]): Promise<RawCatalogProduct[]> {
-    const ids = Array.isArray(productIds) ? productIds : [productIds];
+  async searchProducts(
+    query: string,
+    opts: { page?: number; pageSize?: number; stores?: StoreContext[] } = {}
+  ): Promise<SearchResult> {
+    const data = await this.filterSearch(query, { ...opts, dealsOnly: false });
+    const products = (data.products ?? []).map(mapCatalogProduct);
+    return {
+      products,
+      total: data.totalCount ?? products.length,
+      deals: normalizeBonusBuys(data.bonusBuys),
+    };
+  }
+
+  /**
+   * Run a deals-only filter search (`filterOptions.dealsOnly=true`) and return
+   * the normalized bonus-buy deals plus any products the search surfaced.
+   */
+  async getDeals(
+    query: string,
+    opts: {
+      dealsOnly?: boolean;
+      page?: number;
+      pageSize?: number;
+      stores?: StoreContext[];
+    } = {}
+  ): Promise<DealsResult> {
+    const { dealsOnly = true, ...rest } = opts;
+    const data = await this.filterSearch(query, { ...rest, dealsOnly });
+    return {
+      deals: normalizeBonusBuys(data.bonusBuys),
+      products: (data.products ?? []).map(mapCatalogProduct),
+    };
+  }
+
+  /** Shared catalog `products/filter` lookup by product id (one or many). */
+  private async productFilter(ids: string[]): Promise<CatalogResponse> {
+    if (ids.length === 0) return {};
     const headers = await this.headers();
 
     const body = {
@@ -330,7 +404,41 @@ export class CheckersAPI {
       `${CONFIG.CATALOG_API}/api/v3/products/filter?isCarousel=false&includePromotions=true&promotionChannel=sixty60&isXtraSavings=true`,
       { headers, json: body, retry: "safe" }
     );
-    return res.data?.products ?? [];
+    return res.data ?? {};
+  }
+
+  /** Fetch raw product details by ID (one or many). */
+  async getProductDetails(productIds: string | string[]): Promise<RawCatalogProduct[]> {
+    const ids = Array.isArray(productIds) ? productIds : [productIds];
+    const data = await this.productFilter(ids);
+    return data.products ?? [];
+  }
+
+  /**
+   * Fetch raw products by id together with the bonus-buy deals attached to the
+   * same response. Deals are returned whole; callers resolve each product's
+   * `bonusBuyIds` against them.
+   */
+  async getProductsWithDeals(ids: string[]): Promise<DealsResult> {
+    const data = await this.productFilter(ids);
+    return {
+      deals: normalizeBonusBuys(data.bonusBuys),
+      products: (data.products ?? []).map(mapCatalogProduct),
+    };
+  }
+
+  /** Product detail for a single id plus only the deals that product belongs to. */
+  async getProductDetail(id: string): Promise<ProductWithDeals> {
+    const data = await this.productFilter([id]);
+    const raw = data.products?.find((p) => p.id === id) ?? data.products?.[0];
+    const allDeals = normalizeBonusBuys(data.bonusBuys);
+    const belongs = new Set(
+      Array.isArray(raw?.bonusBuyIds) ? (raw.bonusBuyIds as string[]) : []
+    );
+    return {
+      raw,
+      deals: allDeals.filter((d) => belongs.has(d.id)),
+    };
   }
 
   // ── Cart (orders-api.sixty60.co.za) ─────────────────────────────────────

@@ -20,7 +20,7 @@ export async function search(
 
   const api = new CheckersAPI();
   // The catalog API is zero-indexed; the CLI exposes 1-indexed pages.
-  const { products, total } = await api.searchProducts(query, {
+  const { products, total, deals } = await api.searchProducts(query, {
     page: Math.max(0, page - 1),
     pageSize: limit,
   });
@@ -28,7 +28,10 @@ export async function search(
   spinner?.stop();
 
   if (json) {
-    process.stdout.write(`${JSON.stringify({ total, products }, null, 2)}\n`);
+    // Products already carry bonusBuyIds + promo fields (oldPrice, discount,
+    // isOnPromotion, onPromotion) from the normalizer; `deals` is the normalized
+    // bonus-buy set attached to this result page.
+    process.stdout.write(`${JSON.stringify({ total, products, deals }, null, 2)}\n`);
     return;
   }
 

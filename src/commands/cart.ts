@@ -1,11 +1,86 @@
 import chalk from "chalk";
 import Table from "cli-table3";
-import { CheckersAPI, type CartLineItem } from "../lib/api.js";
+import {
+  CheckersAPI,
+  type BonusBuy,
+  type CartLineItem,
+  type Product,
+} from "../lib/api.js";
 import { formatRand } from "../lib/format.js";
 import { startSpinner } from "../lib/output.js";
 
 export interface CartOptions {
   json?: boolean;
+  deals?: boolean;
+}
+
+/** One deal and the cart line items whose product qualifies for it. */
+interface CartDeal {
+  id: string;
+  title: string;
+  description: string;
+  validUntil?: string;
+  membersOnly: boolean;
+  /** Cart items that belong to this deal — membership only, never a count/threshold. */
+  items: { productId: string; name: string | null }[];
+}
+
+/**
+ * Resolve the cart's line items against their products' bonus-buy deals.
+ * Membership only: it reports WHICH cart items qualify for WHICH deal, and never
+ * a numeric "X of N" — the buy-threshold lives in the deal's human text, not a
+ * clean field, so no progress is fabricated.
+ */
+async function resolveCartDeals(
+  api: CheckersAPI,
+  items: CartLineItem[],
+  names: Map<string, string>
+): Promise<CartDeal[]> {
+  const productIds = items.map((i) => i.productId);
+  if (productIds.length === 0) return [];
+
+  let products: Product[] = [];
+  let dealList: BonusBuy[] = [];
+  try {
+    const res = await api.getProductsWithDeals(productIds);
+    products = res.products;
+    dealList = res.deals;
+  } catch {
+    return [];
+  }
+
+  const bonusByProduct = new Map<string, string[]>();
+  for (const p of products) {
+    if (Array.isArray(p.bonusBuyIds) && p.bonusBuyIds.length > 0) {
+      bonusByProduct.set(p.id, p.bonusBuyIds);
+    }
+  }
+  const dealById = new Map(dealList.map((d) => [d.id, d]));
+
+  const byDeal = new Map<string, CartDeal>();
+  for (const item of items) {
+    for (const dealId of bonusByProduct.get(item.productId) ?? []) {
+      const deal = dealById.get(dealId);
+      if (!deal) continue;
+      let entry = byDeal.get(dealId);
+      if (!entry) {
+        entry = {
+          id: deal.id,
+          title: deal.title,
+          description: deal.description,
+          validUntil: deal.validUntil,
+          membersOnly: deal.membersOnly,
+          items: [],
+        };
+        byDeal.set(dealId, entry);
+      }
+      entry.items.push({
+        productId: item.productId,
+        name: names.get(item.productId) ?? null,
+      });
+    }
+  }
+  return [...byDeal.values()];
 }
 
 /** Resolve product ids to display names (best-effort; tolerates failures). */
@@ -31,7 +106,7 @@ export function cartTotal(items: CartLineItem[]): number {
 }
 
 export async function cart(options: CartOptions = {}): Promise<void> {
-  const { json = false } = options;
+  const { json = false, deals: withDeals = false } = options;
   const spinner = json ? null : startSpinner("Fetching cart…");
 
   const api = new CheckersAPI();
@@ -40,6 +115,9 @@ export async function cart(options: CartOptions = {}): Promise<void> {
     api,
     state.items.map((i) => i.productId)
   );
+  const cartDeals = withDeals
+    ? await resolveCartDeals(api, state.items, names)
+    : [];
   spinner?.stop();
 
   if (json) {
@@ -56,6 +134,7 @@ export async function cart(options: CartOptions = {}): Promise<void> {
             quantity: i.quantity,
             price: i.price,
           })),
+          ...(withDeals ? { deals: cartDeals } : {}),
         },
         null,
         2
@@ -94,5 +173,37 @@ export async function cart(options: CartOptions = {}): Promise<void> {
   process.stdout.write(`\n${table.toString()}\n`);
   process.stdout.write(
     `${chalk.bold(`  Total: ${formatRand(cartTotal(state.items))}`)} ${chalk.dim(`(${state.items.length} items)`)}\n\n`
+  );
+
+  if (withDeals) printCartDeals(cartDeals);
+}
+
+/** Print the membership-only bonus-buy section for `cart --deals`. */
+function printCartDeals(cartDeals: CartDeal[]): void {
+  if (cartDeals.length === 0) {
+    process.stdout.write(
+      `${chalk.dim("  No bonus-buy deals apply to items in your cart.")}\n\n`
+    );
+    return;
+  }
+
+  process.stdout.write(`${chalk.bold(`🏷  Bonus-buy deals (${cartDeals.length})`)}\n`);
+  for (const d of cartDeals) {
+    process.stdout.write(`\n  ${chalk.bold(d.title || d.id)}`);
+    if (d.membersOnly) process.stdout.write(` ${chalk.cyan("[Xtra Savings]")}`);
+    process.stdout.write("\n");
+    if (d.description && d.description !== d.title) {
+      process.stdout.write(`    ${chalk.dim(d.description)}\n`);
+    }
+    if (d.validUntil) {
+      process.stdout.write(`    ${chalk.dim(`valid until ${d.validUntil.slice(0, 10)}`)}\n`);
+    }
+    process.stdout.write(`    ${chalk.dim("Qualifying items in your cart:")}\n`);
+    for (const item of d.items) {
+      process.stdout.write(`      • ${item.name ?? item.productId}\n`);
+    }
+  }
+  process.stdout.write(
+    `\n${chalk.dim("  Terms (buy-quantity & saving) are in each deal's description.")}\n\n`
   );
 }

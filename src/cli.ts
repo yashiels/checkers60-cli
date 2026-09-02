@@ -215,15 +215,55 @@ Examples:
     })
   );
 
+// ── deals ──────────────────────────────────────────────────────────────
+program
+  .command("deals <query>")
+  .description("List bonus-buy deals for a search term")
+  .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 deals "flowers"
+  $ checkers60 deals "chocolate" --json
+`
+  )
+  .action(
+    wrap(async (query: string, opts: { json?: boolean }) => {
+      const { deals } = await import("./commands/deals.js");
+      await deals(query, { json: mergeJson(opts) });
+    })
+  );
+
+// ── show ───────────────────────────────────────────────────────────────
+program
+  .command("show <id>")
+  .description("Show product detail and any bonus-buy deals it belongs to")
+  .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 show 68592087017ec10565d762e3
+`
+  )
+  .action(
+    wrap(async (id: string, opts: { json?: boolean }) => {
+      const { show } = await import("./commands/show.js");
+      await show(id, { json: mergeJson(opts) });
+    })
+  );
+
 // ── cart ───────────────────────────────────────────────────────────────
 program
   .command("cart")
   .description("Show cart contents")
+  .option("--deals", "Show which cart items qualify for bonus-buy deals", false)
   .option("--json", "Output JSON", false)
   .action(
-    wrap(async (opts: { json?: boolean }) => {
+    wrap(async (opts: { deals?: boolean; json?: boolean }) => {
       const { cart } = await import("./commands/cart.js");
-      await cart({ json: mergeJson(opts) });
+      await cart({ json: mergeJson(opts), deals: opts.deals });
     })
   );
 
@@ -351,7 +391,7 @@ program
 // ── categories ─────────────────────────────────────────────────────────
 program
   .command("categories")
-  .description("Browse product categories (not exposed by the mobile API)")
+  .description("Browse product categories (not wired up yet — endpoint host TBD)")
   .option("--json", "Output JSON", false)
   .action(
     wrap(async (opts: { json?: boolean }) => {
@@ -363,7 +403,7 @@ program
 // ── trending ───────────────────────────────────────────────────────────
 program
   .command("trending")
-  .description("Show trending searches (not exposed by the mobile API)")
+  .description("Show trending searches (deprecated — not exposed by the mobile API)")
   .option("--json", "Output JSON", false)
   .action(
     wrap(async (opts: { json?: boolean }) => {

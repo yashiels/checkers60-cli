@@ -1,0 +1,336 @@
+{
+  "totalCount": 3,
+  "success": true,
+  "bonusBuys": {
+    "6a59eae29ec9a2362c756df6": {
+      "id": "6a59eae29ec9a2362c756df6",
+      "createdOn": 1784277730967,
+      "updatedOn": 1788372411523,
+      "active": true,
+      "code": "201342022",
+      "promotionId": "989462",
+      "name": "Buy 2 & Save 20%",
+      "shortDescription": "Buy 2 & Save 20%",
+      "longDescription": "Buy Any 2 Selected Bouquet Flowers Bunch And Save 20%",
+      "discountTypeId": "617ac38078b00cc626391824",
+      "discountType": {
+        "id": "617ac38078b00cc626391824",
+        "createdOn": 1635435392661,
+        "updatedOn": 1635435392661,
+        "active": true,
+        "code": "other",
+        "name": "Other",
+        "description": "Complex discount deals",
+        "symbol": ""
+      },
+      "discountValue": 0,
+      "memberTypeId": "617ac38078b00cc626391829",
+      "memberType": {
+        "id": "617ac38078b00cc626391829",
+        "createdOn": 1635435392661,
+        "updatedOn": 1635435392661,
+        "active": true,
+        "code": "fox_members",
+        "name": "Xtra Savings Members",
+        "description": "Available to xtra savings members only",
+        "symbol": ""
+      },
+      "offerTypeId": "617ac38278b00cc62639182f",
+      "offerType": {
+        "id": "617ac38278b00cc62639182f",
+        "createdOn": 1635435392661,
+        "updatedOn": 1635435392661,
+        "active": true,
+        "code": "untranslated",
+        "name": "Untranslated",
+        "description": "Targeted offer type was not translated by Sixty60",
+        "symbol": ""
+      },
+      "startDate": 1785708000000,
+      "endDate": 1788731999000,
+      "imageId": null,
+      "productOfferImageId": null,
+      "redemptionLimit": 0,
+      "products": [
+        "10604195EA",
+        "10637849EA",
+        "10637850EA"
+      ],
+      "productIds": [
+        "61af23eb93a7758ae0032c57",
+        "626151da7278a85663fa619b",
+        "619f869597d864bfa6f5b5be"
+      ],
+      "stores": [
+        "96304",
+        "171889",
+        "96710"
+      ],
+      "storeIds": [
+        "5d3af81c413122f372125fff",
+        "5e9d7984ed60393617c50e91",
+        "5ea5d0f7a6e849349d5c977d"
+      ],
+      "browseStoreIds": [
+        "69e5fc73fa670d43ca760380",
+        "69e5fc73fa670d43ca76039d",
+        "69e5fc73fa670d43ca7603b2"
+      ],
+      "rewardProducts": [
+        "10604195EA",
+        "10637849EA",
+        "10637850EA"
+      ],
+      "channelSpecificPromotions": {
+        "instore": true,
+        "sixty60": true,
+        "liquorShop": true,
+        "checkersFoodServices": true,
+        "petShopScience": true
+      },
+      "channelIndicator": "Store and Online"
+    },
+    "6a7d7824d3a6d0f04ff1537a": {
+      "id": "6a7d7824d3a6d0f04ff1537a",
+      "createdOn": 1786607652581,
+      "updatedOn": 1788307706227,
+      "active": true,
+      "code": "201360701",
+      "promotionId": "1001694",
+      "name": "Buy 2 & Save 25%",
+      "shortDescription": "Buy 2 & Save 25%",
+      "longDescription": "Buy Any 2 Selected Lindt Chocolate And Save 25%",
+      "discountTypeId": "617ac38078b00cc626391824",
+      "discountType": {
+        "id": "617ac38078b00cc626391824",
+        "createdOn": 1635435392661,
+        "updatedOn": 1635435392661,
+        "active": true,
+        "code": "other",
+        "name": "Other",
+        "description": "Complex discount deals",
+        "symbol": ""
+      },
+      "discountValue": 0,
+      "memberTypeId": "617ac38078b00cc626391829",
+      "memberType": {
+        "id": "617ac38078b00cc626391829",
+        "createdOn": 1635435392661,
+        "updatedOn": 1635435392661,
+        "active": true,
+        "code": "fox_members",
+        "name": "Xtra Savings Members",
+        "description": "Available to xtra savings members only",
+        "symbol": ""
+      },
+      "offerTypeId": "617ac38278b00cc62639182f",
+      "offerType": {
+        "id": "617ac38278b00cc62639182f",
+        "createdOn": 1635435392661,
+        "updatedOn": 1635435392661,
+        "active": true,
+        "code": "untranslated",
+        "name": "Untranslated",
+        "description": "Targeted offer type was not translated by Sixty60",
+        "symbol": ""
+      },
+      "startDate": 1786312800000,
+      "endDate": 1788731999000,
+      "imageId": null,
+      "productOfferImageId": null,
+      "redemptionLimit": 0,
+      "products": [
+        "10399590EA",
+        "10181715EA",
+        "10233710EA"
+      ],
+      "productIds": [
+        "5f18234d200f0d6224afac72",
+        "5d3af63ff434cf8420737f7b",
+        "5f18234e200f0d6224afac73"
+      ],
+      "stores": [
+        "6446",
+        "67929",
+        "96710"
+      ],
+      "storeIds": [
+        "5d3af81c413122f372125fff",
+        "5e9d5d65b54e17eeda07f5ee",
+        "5e8eceb40671a596bf2fa3e4"
+      ],
+      "browseStoreIds": [
+        "69e5fc73fa670d43ca760380",
+        "69e5fc73fa670d43ca76039d",
+        "69e5fc73fa670d43ca7603b2"
+      ],
+      "rewardProducts": [
+        "10399590EA",
+        "10181715EA",
+        "10233710EA"
+      ],
+      "channelSpecificPromotions": {
+        "instore": true,
+        "sixty60": true,
+        "liquorShop": true,
+        "checkersFoodServices": true,
+        "petShopScience": true
+      },
+      "channelIndicator": "Store and Online"
+    },
+    "6a8eb239c7b3ccf745c71783": {
+      "id": "6a8eb239c7b3ccf745c71783",
+      "createdOn": 1787736633719,
+      "updatedOn": 1788372428466,
+      "active": true,
+      "code": "201368428",
+      "promotionId": "1008087",
+      "name": "Buy 2 & Save 20%",
+      "shortDescription": "Buy 2 & Save 20%",
+      "longDescription": "Buy Any 2 Assorted Cut Flowers or Potted Plants And Save 20%",
+      "discountTypeId": "617ac38078b00cc626391824",
+      "discountType": {
+        "id": "617ac38078b00cc626391824",
+        "createdOn": 1635435392661,
+        "updatedOn": 1635435392661,
+        "active": true,
+        "code": "other",
+        "name": "Other",
+        "description": "Complex discount deals",
+        "symbol": ""
+      },
+      "discountValue": 0,
+      "memberTypeId": "617ac38078b00cc626391829",
+      "memberType": {
+        "id": "617ac38078b00cc626391829",
+        "createdOn": 1635435392661,
+        "updatedOn": 1635435392661,
+        "active": true,
+        "code": "fox_members",
+        "name": "Xtra Savings Members",
+        "description": "Available to xtra savings members only",
+        "symbol": ""
+      },
+      "offerTypeId": "617ac38278b00cc62639182f",
+      "offerType": {
+        "id": "617ac38278b00cc62639182f",
+        "createdOn": 1635435392661,
+        "updatedOn": 1635435392661,
+        "active": true,
+        "code": "untranslated",
+        "name": "Untranslated",
+        "description": "Targeted offer type was not translated by Sixty60",
+        "symbol": ""
+      },
+      "startDate": 1788127200000,
+      "endDate": 1788472799000,
+      "imageId": null,
+      "productOfferImageId": null,
+      "redemptionLimit": 0,
+      "products": [
+        "10760635EA",
+        "10941450EA",
+        "10911812EA"
+      ],
+      "productIds": [
+        "631207725f36586c005501e2",
+        "68d55a6f2feeffc649baeda1",
+        "67fe244c77775db9a39a34da"
+      ],
+      "stores": [
+        "96304",
+        "171889",
+        "96710"
+      ],
+      "storeIds": [
+        "5d3af81c413122f372125fff",
+        "5e9d7984ed60393617c50e91",
+        "5ea5d0f7a6e849349d5c977d"
+      ],
+      "browseStoreIds": [
+        "69e5fc73fa670d43ca760380",
+        "69e5fc73fa670d43ca76039d",
+        "69e5fc73fa670d43ca7603b2"
+      ],
+      "rewardProducts": [
+        "10941450EA",
+        "10728394EA",
+        "10159545EA"
+      ],
+      "channelSpecificPromotions": {
+        "instore": true,
+        "sixty60": true,
+        "liquorShop": true,
+        "checkersFoodServices": true,
+        "petShopScience": true
+      },
+      "channelIndicator": "Store and Online"
+    }
+  },
+  "products": [
+    {
+      "id": "68592087017ec10565d762e3",
+      "name": "Bright Rose Flower Selection (Colour May Vary)",
+      "displayName": "Bright Rose Flower Selection (Colour May Vary)",
+      "priceWithoutDecimal": 12999,
+      "priceFactor": 100,
+      "oldPrice": 12999,
+      "discount": 0,
+      "isOnPromotion": false,
+      "currencySymbol": "R",
+      "storeId": "60dc2d30c1f98d8e2a812b9e",
+      "serviceOptionId": "sixty-min-delivery",
+      "imageId": "6a635e9e8813a5479af7c908",
+      "stockOnHand": 6,
+      "active": true,
+      "ranged": true,
+      "storeProductActive": true,
+      "maxPerOrder": 10,
+      "bonusBuyIds": [
+        "6a8eb239c7b3ccf745c71783"
+      ]
+    },
+    {
+      "id": "619f869797d864bfa6f5b5c1",
+      "name": "Safari Sunset Flower Bouquet",
+      "displayName": "Safari Sunset Flower Bouquet",
+      "priceWithoutDecimal": 14999,
+      "priceFactor": 100,
+      "oldPrice": 14999,
+      "discount": 0,
+      "isOnPromotion": false,
+      "currencySymbol": "R",
+      "storeId": "5d3b1d53e2f1870008949951",
+      "serviceOptionId": "sixty-min-delivery",
+      "imageId": "6a635c5719c47ae8f9911aa8",
+      "stockOnHand": 2,
+      "active": true,
+      "ranged": true,
+      "storeProductActive": true,
+      "maxPerOrder": 3,
+      "bonusBuyIds": [
+        "6a8eb239c7b3ccf745c71783"
+      ]
+    },
+    {
+      "id": "5ff534d89f4d465e5db322c3",
+      "name": "Edible Flowers 10g",
+      "displayName": "Edible Flowers 10g",
+      "priceWithoutDecimal": 1999,
+      "priceFactor": 100,
+      "oldPrice": 1999,
+      "discount": 0,
+      "isOnPromotion": false,
+      "currencySymbol": "R",
+      "storeId": "60dc2d30c1f98d8e2a812b9e",
+      "serviceOptionId": "sixty-min-delivery",
+      "imageId": "6a694700b0c8d7e7bebe648b",
+      "stockOnHand": 2,
+      "active": true,
+      "ranged": true,
+      "storeProductActive": true,
+      "maxPerOrder": 10,
+      "bonusBuyIds": []
+    }
+  ]
+}
