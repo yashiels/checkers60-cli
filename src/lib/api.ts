@@ -6,6 +6,7 @@ import {
   type StoreContext,
 } from "./config.js";
 import { TokenManager } from "./credentials.js";
+import { getDeviceId } from "./runtime.js";
 import { request, APIError } from "./http.js";
 
 export { APIError };
@@ -238,7 +239,7 @@ export class CheckersAPI {
       "app-version": CONFIG.APP_VERSION,
       appversion: CONFIG.APP_VERSION_CODE,
       "istio-appversion": CONFIG.APP_VERSION_CODE,
-      "device-id": CONFIG.DEVICE_ID,
+      "device-id": getDeviceId(),
       "customer-id": CONFIG.SHOPRITE_UUID,
       userid: CONFIG.SIXTY60_USER_ID,
       mobilenumber: CONFIG.MOBILE,
@@ -553,7 +554,7 @@ export class CheckersAPI {
           "channel-os": CONFIG.APP_VERSION,
           "app-version": CONFIG.APP_VERSION,
           appversion: CONFIG.APP_VERSION_CODE,
-          "device-id": CONFIG.DEVICE_ID,
+          "device-id": getDeviceId(),
           "customer-id": CONFIG.SHOPRITE_UUID,
         },
         retry: "safe",

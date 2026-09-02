@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { CONFIG } from "./config.js";
+import { getDeviceId } from "./runtime.js";
 import { request, APIError } from "./http.js";
 import {
   withCredentialsLock,
@@ -110,7 +111,7 @@ export class TokenManager {
       {
         headers: {
           channel: CONFIG.CHANNEL,
-          "device-id": CONFIG.DEVICE_ID,
+          "device-id": getDeviceId(),
           "content-length": "0",
         },
         signal: ctx.signal,
@@ -262,7 +263,7 @@ export class TokenManager {
       channel: CONFIG.CHANNEL,
       "app-version": CONFIG.APP_VERSION,
       appversion: CONFIG.APP_VERSION_CODE,
-      "device-id": CONFIG.DEVICE_ID,
+      "device-id": getDeviceId(),
     };
   }
 }

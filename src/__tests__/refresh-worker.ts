@@ -9,6 +9,7 @@
  */
 import { appendFileSync } from "node:fs";
 import { TokenManager } from "../lib/credentials.js";
+import { initRuntime } from "../lib/runtime.js";
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -42,6 +43,7 @@ globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
 }) as typeof fetch;
 
 async function main(): Promise<void> {
+  await initRuntime();
   const barrier = Number(process.env.BARRIER_TS ?? 0);
   while (Date.now() < barrier) await sleep(5);
 

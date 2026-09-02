@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { CONFIG } from "../lib/config.js";
 import { TokenManager, clearCredentials } from "../lib/credentials.js";
+import { initRuntime, resetRuntimeForTests } from "../lib/runtime.js";
 import {
   atomicWriteJson,
   sweepOrphans,
@@ -30,6 +31,7 @@ import {
 let tempDir: string;
 let credsPath: string;
 const origCredsPath = CONFIG.CREDS_PATH;
+const origEnvDeviceId = process.env.CHECKERS60_DEVICE_ID;
 const realFetch = globalThis.fetch;
 
 function readDisk(): CredentialsFile {
@@ -44,14 +46,22 @@ function mode(path: string): number {
   return statSync(path).mode & 0o777;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   tempDir = mkdtempSync(join(tmpdir(), "creds-test-"));
   credsPath = join(tempDir, "checkers60.json");
   CONFIG.CREDS_PATH = credsPath;
+  // Header builders read the resolved device id via getDeviceId(); pin one via
+  // env (session-only, never persisted) so this suite's token flows can run.
+  process.env.CHECKERS60_DEVICE_ID = "test-device-id";
+  resetRuntimeForTests();
+  await initRuntime();
 });
 
 afterEach(() => {
   CONFIG.CREDS_PATH = origCredsPath;
+  if (origEnvDeviceId === undefined) delete process.env.CHECKERS60_DEVICE_ID;
+  else process.env.CHECKERS60_DEVICE_ID = origEnvDeviceId;
+  resetRuntimeForTests();
   globalThis.fetch = realFetch;
   vi.restoreAllMocks();
   rmSync(tempDir, { recursive: true, force: true });
@@ -289,6 +299,7 @@ describe("cross-process locking (real child processes)", () => {
           env: {
             ...process.env,
             CHECKERS60_CREDS_PATH: credsPath,
+            CHECKERS60_DEVICE_ID: "test-device-id",
             WORKER_COUNTER: counterPath,
             BARRIER_TS: String(barrier),
           },

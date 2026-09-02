@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configureOutput, isJson } from "./lib/output.js";
+import { initRuntime } from "./lib/runtime.js";
 import { wrap, handleError, UsageError, EXIT_USAGE } from "./lib/errors.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -50,7 +51,7 @@ const program = new Command()
   .addOption(new Option("-q, --quiet", "suppress non-essential output").default(false))
   .addOption(new Option("-v, --verbose", "show extra debug info").default(false))
   .addOption(new Option("--json", "output machine-readable JSON").default(false))
-  .hook("preAction", (thisCommand) => {
+  .hook("preAction", async (thisCommand) => {
     const opts = thisCommand.opts<{
       color?: boolean;
       quiet?: boolean;
@@ -64,6 +65,9 @@ const program = new Command()
       verbose: opts.verbose,
       json: isJson() || Boolean(opts.json),
     });
+    // Resolve the per-install device id once, before any command action builds
+    // headers or an API client. Runs after arg parse; not for --help/--version.
+    await initRuntime();
   })
   .showHelpAfterError()
   .configureOutput({

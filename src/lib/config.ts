@@ -106,7 +106,8 @@ export const CONFIG = {
   CHANNEL: "super-app",
   APP_VERSION: "Android 2.0.114 (1778865226)",
   APP_VERSION_CODE: "1778865226",
-  DEVICE_ID: env.CHECKERS60_DEVICE_ID || "e0ce1cc2565366d7",
+  // Per-install device id lives in module state (see runtime.ts); header
+  // builders read it via getDeviceId() after initRuntime() resolves it.
   USER_AGENT: "okhttp/4.12.0",
 
   // ── User identity (from env; two distinct IDs) ───────────────────────────
