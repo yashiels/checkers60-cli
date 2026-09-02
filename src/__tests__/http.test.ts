@@ -5,6 +5,8 @@ import {
   TimeoutError,
   ExternalAbortError,
   redactUrl,
+  parseRetryAfter,
+  MAX_ATTEMPTS,
 } from "../lib/http.js";
 
 function abortError(): Error {
@@ -37,15 +39,29 @@ function abortAwareFetch(bodyNeverResolves = false) {
 
 function fakeResponse(
   body: unknown,
-  { status = 200, statusText = "OK" }: { status?: number; statusText?: string } = {}
+  {
+    status = 200,
+    statusText = "OK",
+    headers = {},
+  }: { status?: number; statusText?: string; headers?: Record<string, string> } = {}
 ): Response {
   return {
     ok: status >= 200 && status < 300,
     status,
     statusText,
-    headers: new Headers(),
+    headers: new Headers(headers),
     text: async () => (typeof body === "string" ? body : JSON.stringify(body)),
   } as unknown as Response;
+}
+
+/** fetch mock that returns/throws one step per call, repeating the last step. */
+function stepFetch(steps: Array<Response | Error>) {
+  let i = 0;
+  return vi.fn((): Promise<Response> => {
+    const step = steps[Math.min(i, steps.length - 1)];
+    i++;
+    return step instanceof Error ? Promise.reject(step) : Promise.resolve(step);
+  });
 }
 
 interface FetchInit {
@@ -227,5 +243,151 @@ describe("request cleanup", () => {
 
     expect(clearSpy).toHaveBeenCalled();
     expect(removeSpy).toHaveBeenCalled();
+  });
+});
+
+describe("parseRetryAfter", () => {
+  it("parses the delta-seconds form and converts to ms", () => {
+    expect(parseRetryAfter("2", 60_000)).toBe(2000);
+  });
+
+  it("parses the HTTP-date form relative to now", () => {
+    const when = new Date(Date.now() + 3000).toUTCString();
+    const ms = parseRetryAfter(when, 60_000);
+    expect(ms).toBeGreaterThan(1000);
+    expect(ms).toBeLessThanOrEqual(3000);
+  });
+
+  it("caps the parsed delay at capMs", () => {
+    expect(parseRetryAfter("3600", 5000)).toBe(5000);
+    const farFuture = new Date(Date.now() + 3_600_000).toUTCString();
+    expect(parseRetryAfter(farFuture, 5000)).toBe(5000);
+  });
+
+  it("returns undefined for an absent or unparseable value", () => {
+    expect(parseRetryAfter(undefined, 60_000)).toBeUndefined();
+    expect(parseRetryAfter("not-a-date", 60_000)).toBeUndefined();
+  });
+});
+
+describe("request retry policy", () => {
+  const fast = { retry: "safe" as const, backoffBaseMs: 1, backoffCapMs: 2 };
+
+  it("retries a 503 then succeeds (safe)", async () => {
+    const fetchMock = stepFetch([
+      fakeResponse("busy", { status: 503, statusText: "Service Unavailable" }),
+      fakeResponse({ ok: true }),
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await request<{ ok: boolean }>("GET", "https://example.com/x", fast);
+    expect(res.data.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a pre-response network error then succeeds (safe)", async () => {
+    const fetchMock = stepFetch([new TypeError("network down"), fakeResponse({ ok: true })]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await request<{ ok: boolean }>("GET", "https://example.com/x", fast);
+    expect(res.data.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry a 400 (non-retryable status)", async () => {
+    const fetchMock = stepFetch([fakeResponse("bad", { status: 400 })]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(request("GET", "https://example.com/x", fast)).rejects.toBeInstanceOf(APIError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT retry a mutation / retry:\"never\" call at all", async () => {
+    const fetchMock = stepFetch([fakeResponse("busy", { status: 503 })]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Default policy is "never".
+    await expect(request("POST", "https://example.com/cart", { json: {} })).rejects.toBeInstanceOf(
+      APIError
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never retries an external abort and never relabels it as a timeout", async () => {
+    vi.stubGlobal("fetch", abortAwareFetch());
+    const ext = new AbortController();
+    const p = request("GET", "https://example.com/x", {
+      ...fast,
+      signal: ext.signal,
+      timeoutMs: 10_000,
+    });
+    ext.abort();
+
+    const err = await p.catch((e) => e);
+    expect(err).toBeInstanceOf(ExternalAbortError);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+  });
+
+  it("honors and caps a Retry-After header (seconds form)", async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const fetchMock = stepFetch([
+      fakeResponse("busy", { status: 503, headers: { "retry-after": "3600" } }),
+      fakeResponse({ ok: true }),
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await request<{ ok: boolean }>("GET", "https://example.com/x", {
+      retry: "safe",
+      retryAfterCapMs: 40,
+    });
+    expect(res.data.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // The backoff wait is the capped Retry-After (40ms), never the raw 3600s.
+    const delays = setTimeoutSpy.mock.calls.map((c) => c[1]);
+    expect(delays).toContain(40);
+    expect(delays.every((d) => (d ?? 0) < 3_600_000)).toBe(true);
+  });
+
+  it("honors a Retry-After header in HTTP-date form", async () => {
+    const when = new Date(Date.now() + 20).toUTCString();
+    const fetchMock = stepFetch([
+      fakeResponse("busy", { status: 503, headers: { "retry-after": when } }),
+      fakeResponse({ ok: true }),
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await request<{ ok: boolean }>("GET", "https://example.com/x", {
+      retry: "safe",
+      retryAfterCapMs: 60_000,
+    });
+    expect(res.data.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds total retrying by the overall time budget", async () => {
+    // Budget is too small to afford even a second attempt's backoff.
+    const fetchMock = stepFetch([fakeResponse("busy", { status: 503 })]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      request("GET", "https://example.com/x", {
+        retry: "safe",
+        retryBudgetMs: 5,
+        backoffBaseMs: 1000,
+      })
+    ).rejects.toBeInstanceOf(APIError);
+    // Fewer than the max attempts because the budget ran out.
+    expect(fetchMock.mock.calls.length).toBeLessThan(MAX_ATTEMPTS);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("respects the max-3-attempts ceiling", async () => {
+    const fetchMock = stepFetch([fakeResponse("busy", { status: 503 })]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(request("GET", "https://example.com/x", fast)).rejects.toBeInstanceOf(APIError);
+    expect(fetchMock).toHaveBeenCalledTimes(MAX_ATTEMPTS);
+    expect(MAX_ATTEMPTS).toBe(3);
   });
 });

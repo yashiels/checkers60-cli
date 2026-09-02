@@ -301,7 +301,7 @@ export class CheckersAPI {
       `${CONFIG.CATALOG_API}/api/v3/products/filter?isCarousel=false&includePromotions=true&promotionChannel=sixty60&isXtraSavings=true&isXtraSavingsMember=true&particularMemberBonusBuyIds=&t=${t}`,
       // The catalog decodes a JSON body; the sibling getProductDetails call
       // uses `json` too. Sending it form-urlencoded returns 400 and broke search.
-      { headers, json: body }
+      { headers, json: body, retry: "safe" }
     );
 
     const products = (res.data?.products ?? []).map(mapCatalogProduct);
@@ -327,7 +327,7 @@ export class CheckersAPI {
     const res = await request<CatalogResponse>(
       "POST",
       `${CONFIG.CATALOG_API}/api/v3/products/filter?isCarousel=false&includePromotions=true&promotionChannel=sixty60&isXtraSavings=true`,
-      { headers, json: body }
+      { headers, json: body, retry: "safe" }
     );
     return res.data?.products ?? [];
   }
@@ -341,7 +341,7 @@ export class CheckersAPI {
     const res = await request<CartsResponse>(
       "POST",
       `${CONFIG.ORDERS_API}/api/v2/carts/user?useProductMinInfoAnnotation=true`,
-      { headers, json: { storeContexts } }
+      { headers, json: { storeContexts }, retry: "safe" }
     );
 
     const carts = res.data?.carts ?? [];
@@ -441,7 +441,7 @@ export class CheckersAPI {
     const res = await request<{ items?: Address[] }>(
       "GET",
       `${CONFIG.AUTH_API}/customers/${userId}/addresses`,
-      { headers }
+      { headers, retry: "safe" }
     );
     return res.data?.items ?? [];
   }
@@ -452,7 +452,7 @@ export class CheckersAPI {
     const res = await request<{ cards?: Card[] }>(
       "GET",
       `${CONFIG.AUTH_API}/customers/${userId}/cards`,
-      { headers }
+      { headers, retry: "safe" }
     );
     return res.data?.cards ?? [];
   }
@@ -464,7 +464,7 @@ export class CheckersAPI {
     const res = await request<{ orderGroups?: OrderGroup[] }>(
       "GET",
       `${CONFIG.ORDERS_API}/api/v1/orders/groups?activeOnly=${activeOnly}`,
-      { headers }
+      { headers, retry: "safe" }
     );
     return res.data?.orderGroups ?? [];
   }
@@ -556,6 +556,7 @@ export class CheckersAPI {
           "device-id": CONFIG.DEVICE_ID,
           "customer-id": CONFIG.SHOPRITE_UUID,
         },
+        retry: "safe",
       }
     );
     return res.data?.response?.user;
