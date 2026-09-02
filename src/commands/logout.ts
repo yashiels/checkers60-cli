@@ -2,7 +2,7 @@ import chalk from "chalk";
 import { clearCredentials } from "../lib/credentials.js";
 
 export async function logout(): Promise<void> {
-  const cleared = clearCredentials();
+  const cleared = await clearCredentials();
   if (cleared) {
     process.stdout.write(`${chalk.green("✅ Logged out. Saved tokens cleared.")}\n`);
   } else {

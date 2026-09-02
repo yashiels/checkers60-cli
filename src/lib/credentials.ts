@@ -1,31 +1,20 @@
-import {
-  readFileSync,
-  writeFileSync,
-  existsSync,
-  mkdirSync,
-  unlinkSync,
-} from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
 import { CONFIG } from "./config.js";
 import { request, APIError } from "./http.js";
+import {
+  withCredentialsLock,
+  updateBffTokenLocked,
+  updateUserTokensLocked,
+  updateOtpResultLocked,
+  updateIdentityLocked,
+  clearCredentialsStore,
+  type CredentialsFile,
+  type LockedContext,
+} from "./creds-store.js";
 
-/**
- * Shape of the on-disk credentials file
- * (~/.openclaw/credentials/checkers60.json).
- */
-export interface CredentialsFile {
-  bff_token?: string | null;
-  bff_expiry?: number;
-  user_token?: string | null;
-  refresh_token?: string | null;
-  user_expiry?: number;
-  mobile?: string;
-  customer_id?: string;
-  sixty60_user_id?: string;
-  profile_token?: string;
-  updated_at?: string;
-}
+export type { CredentialsFile };
 
+/** Read-only load. Degrades to logged-out ({}) on a missing/corrupt file. */
 export function loadCredentials(): CredentialsFile {
   try {
     if (existsSync(CONFIG.CREDS_PATH)) {
@@ -37,13 +26,13 @@ export function loadCredentials(): CredentialsFile {
   return {};
 }
 
-/** Delete the saved credentials file (used by `logout`). */
-export function clearCredentials(): boolean {
-  if (existsSync(CONFIG.CREDS_PATH)) {
-    unlinkSync(CONFIG.CREDS_PATH);
-    return true;
-  }
-  return false;
+/**
+ * Delete the saved credentials (used by `logout`). Runs under the credential
+ * lock and PRESERVES `device_id` so logout doesn't rotate the installation
+ * identity. Returns whether anything was cleared.
+ */
+export function clearCredentials(): Promise<boolean> {
+  return clearCredentialsStore();
 }
 
 interface ShopriteTokenResponse {
@@ -55,14 +44,20 @@ interface ShopriteTokenResponse {
   };
 }
 
+const NOT_LOGGED_IN =
+  "Not logged in. Run: checkers60 otp-trigger, then checkers60 otp-verify <reference> <code>";
+
 /**
  * Manages the three tokens the mobile API needs:
  *  - BFF Cognito JWT (24h, no auth required to obtain)
  *  - user access token (from OTP login, ~1h, auto-refreshes)
  *  - refresh token (long-lived, used to mint new access tokens)
  *
- * OTP is NEVER triggered automatically — callers must use the explicit
- * two-step `otp-trigger` / `otp-verify` flow.
+ * All persistence goes through the locked credential store (`creds-store.ts`):
+ * field-scoped, atomic, cross-process safe. In-memory fields are adopted from
+ * the committed on-disk state returned by each transaction. OTP is NEVER
+ * triggered automatically — callers use the explicit two-step
+ * `otp-trigger` / `otp-verify` flow.
  */
 export class TokenManager {
   bffToken: string | null = null;
@@ -77,35 +72,19 @@ export class TokenManager {
 
   private load(): void {
     const c = loadCredentials();
-    this.bffToken = c.bff_token ?? null;
-    this.bffExpiry = c.bff_expiry ?? 0;
-    this.userToken = c.user_token ?? null;
-    this.refreshToken = c.refresh_token ?? null;
-    this.userExpiry = c.user_expiry ?? 0;
+    this.adopt(c);
     // Credentials file overrides env defaults for these identity fields.
     if (c.sixty60_user_id) CONFIG.SIXTY60_USER_ID = c.sixty60_user_id;
     if (c.profile_token) CONFIG.PROFILE_TOKEN = c.profile_token;
   }
 
-  save(): void {
-    // Merge with any existing file to preserve unknown fields.
-    const existing = loadCredentials();
-    const creds: CredentialsFile = {
-      ...existing,
-      bff_token: this.bffToken,
-      bff_expiry: this.bffExpiry,
-      user_token: this.userToken,
-      refresh_token: this.refreshToken,
-      user_expiry: this.userExpiry,
-      mobile: CONFIG.MOBILE || existing.mobile,
-      customer_id: CONFIG.SHOPRITE_UUID || existing.customer_id,
-      sixty60_user_id: CONFIG.SIXTY60_USER_ID || existing.sixty60_user_id,
-      profile_token: CONFIG.PROFILE_TOKEN,
-      updated_at: new Date().toISOString(),
-    };
-    const dir = dirname(CONFIG.CREDS_PATH);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(CONFIG.CREDS_PATH, JSON.stringify(creds, null, 2));
+  /** Adopt in-memory token fields from committed on-disk state. */
+  private adopt(c: CredentialsFile): void {
+    this.bffToken = c.bff_token ?? null;
+    this.bffExpiry = c.bff_expiry ?? 0;
+    this.userToken = c.user_token ?? null;
+    this.refreshToken = c.refresh_token ?? null;
+    this.userExpiry = c.user_expiry ?? 0;
   }
 
   /** True if a non-expired user token (or a refresh token) is available. */
@@ -114,9 +93,16 @@ export class TokenManager {
     return Boolean(this.refreshToken);
   }
 
-  /** Get the BFF Cognito JWT (24h lifetime, no auth needed). */
-  async getBFFToken(): Promise<string> {
-    if (this.bffToken && Date.now() < this.bffExpiry - 60_000) return this.bffToken;
+  /**
+   * Ensure a valid BFF Cognito JWT inside an existing transaction (no re-lock).
+   * Reads fresh disk, refreshes over the network with `ctx.signal`, persists via
+   * `updateBffTokenLocked`, and returns the token.
+   */
+  async getBFFTokenLocked(ctx: LockedContext): Promise<string> {
+    const disk = await ctx.read();
+    if (disk.bff_token && Date.now() < (disk.bff_expiry ?? 0) - 60_000) {
+      return disk.bff_token;
+    }
 
     const res = await request<{ access_token?: string; expires_in?: number }>(
       "POST",
@@ -127,50 +113,83 @@ export class TokenManager {
           "device-id": CONFIG.DEVICE_ID,
           "content-length": "0",
         },
+        signal: ctx.signal,
       }
     );
     if (!res.data?.access_token) {
-      throw new Error(`BFF token request failed: ${JSON.stringify(res.data)}`);
+      throw new Error("BFF token request failed");
     }
 
-    this.bffToken = res.data.access_token;
-    this.bffExpiry = Date.now() + (res.data.expires_in ?? 86_400) * 1000;
-    this.save();
-    return this.bffToken;
+    const bffToken = res.data.access_token;
+    const bffExpiry = Date.now() + (res.data.expires_in ?? 86_400) * 1000;
+    const committed = await updateBffTokenLocked(ctx, { bffToken, bffExpiry });
+    this.adopt(committed);
+    return bffToken;
+  }
+
+  /**
+   * Get the BFF Cognito JWT (24h lifetime, no auth needed). With a locked `ctx`
+   * runs inside the existing transaction; without, opens its own transaction.
+   */
+  async getBFFToken(ctx?: LockedContext): Promise<string> {
+    if (ctx) return this.getBFFTokenLocked(ctx);
+    return withCredentialsLock((c) => this.getBFFTokenLocked(c));
   }
 
   /**
    * Get a valid user access token. Refreshes via the refresh token if needed,
-   * but NEVER triggers an OTP. Throws if no refresh token is available.
+   * but NEVER triggers an OTP. Throws if not logged in.
+   *
+   * Exact reconciliation sequence (§3.1): acquire the lock, read fresh disk,
+   * honor logout (no refresh token → logged out; never resurrect from memory),
+   * adopt any still-valid disk token without a network call, otherwise refresh
+   * against the authoritative disk refresh token (passing `ctx.signal`) and
+   * persist the new triple, keeping the old refresh token when the response
+   * omits a new one.
    */
   async getUserToken(): Promise<string> {
-    if (this.userToken && Date.now() < this.userExpiry - 60_000) return this.userToken;
+    const committed = await withCredentialsLock(async (ctx) => {
+      const disk = await ctx.read();
 
-    if (this.refreshToken) {
-      const bff = await this.getBFFToken();
+      // Honor logout/deletion: no refresh token on disk → logged out.
+      if (!disk.refresh_token) {
+        throw new Error(NOT_LOGGED_IN);
+      }
+
+      // Adopt a still-valid disk token with no network call — even if it equals
+      // memory (never refresh a valid identical token). Never use `updated_at`.
+      if (disk.user_token && Date.now() < (disk.user_expiry ?? 0) - 60_000) {
+        return disk;
+      }
+
+      const baseRefresh = disk.refresh_token;
+      const bff = await this.getBFFTokenLocked(ctx);
       const res = await request<ShopriteTokenResponse>(
         "GET",
-        `${CONFIG.SHOPRITE_BASE}/tokens?refreshToken=${encodeURIComponent(this.refreshToken)}`,
-        { headers: this.shopriteHeaders(bff) }
+        `${CONFIG.SHOPRITE_BASE}/tokens?refreshToken=${encodeURIComponent(baseRefresh)}`,
+        { headers: this.shopriteHeaders(bff), signal: ctx.signal }
       );
       const r = res.data?.response;
-      if (r?.accessToken) {
-        this.userToken = r.accessToken;
-        this.refreshToken = r.refreshToken ?? this.refreshToken;
-        this.userExpiry = Date.now() + (r.expiresIn ?? 3600) * 1000;
-        this.save();
-        return this.userToken;
+      if (!r?.accessToken) {
+        throw new Error("Token refresh failed");
       }
-    }
 
-    throw new Error(
-      "Not logged in. Run: checkers60 otp-trigger, then checkers60 otp-verify <reference> <code>"
-    );
+      return updateUserTokensLocked(ctx, {
+        userToken: r.accessToken,
+        // Never erase a still-valid refresh token when the response omits one.
+        refreshToken: r.refreshToken ?? baseRefresh,
+        userExpiry: Date.now() + (r.expiresIn ?? 3600) * 1000,
+      });
+    });
+
+    this.adopt(committed);
+    if (!committed.user_token) throw new Error(NOT_LOGGED_IN);
+    return committed.user_token;
   }
 
   /**
-   * Step 1 of login: send an OTP SMS to the configured mobile number.
-   * Returns the reference needed for verification.
+   * Step 1 of login: send an OTP SMS to the configured mobile number. Not inside
+   * the user-refresh lock; obtains a BFF token via its own transaction.
    */
   async triggerOtp(): Promise<string> {
     if (!CONFIG.MOBILE) {
@@ -186,14 +205,15 @@ export class TokenManager {
     );
     const reference = res.data?.response?.reference;
     if (!reference) {
-      throw new Error(`OTP trigger failed: ${JSON.stringify(res.data)}`);
+      throw new Error("OTP trigger failed");
     }
     return reference;
   }
 
   /**
-   * Step 2 of login: verify the OTP code against the reference from step 1
-   * and persist the resulting user + refresh tokens.
+   * Step 2 of login: verify the OTP code and persist the resulting tokens. The
+   * network verify runs OUTSIDE the user-refresh lock; the write uses its own
+   * transaction (`updateOtpResult` + `updateIdentity`).
    */
   async verifyOtp(reference: string, otp: string): Promise<void> {
     if (!CONFIG.MOBILE) {
@@ -215,12 +235,23 @@ export class TokenManager {
     );
     const r = res.data?.response;
     if (!r?.accessToken) {
-      throw new Error(`OTP verify failed: ${JSON.stringify(res.data)}`);
+      throw new Error("OTP verify failed");
     }
-    this.userToken = r.accessToken;
-    this.refreshToken = r.refreshToken ?? null;
-    this.userExpiry = Date.now() + (r.expiresIn ?? 3600) * 1000;
-    this.save();
+
+    const committed = await withCredentialsLock(async (ctx) => {
+      await updateOtpResultLocked(ctx, {
+        userToken: r.accessToken ?? null,
+        refreshToken: r.refreshToken ?? null,
+        userExpiry: Date.now() + (r.expiresIn ?? 3600) * 1000,
+      });
+      return updateIdentityLocked(ctx, {
+        mobile: CONFIG.MOBILE,
+        customer_id: CONFIG.SHOPRITE_UUID,
+        sixty60_user_id: CONFIG.SIXTY60_USER_ID,
+        profile_token: CONFIG.PROFILE_TOKEN,
+      });
+    });
+    this.adopt(committed);
   }
 
   /** Shoprite DSL auth headers (used for the BFF-token-protected endpoints). */
