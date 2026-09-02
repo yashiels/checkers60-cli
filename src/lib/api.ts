@@ -404,7 +404,7 @@ export class CheckersAPI {
     );
 
     if (!res.data?.carts) {
-      throw new Error(`Cart update failed: ${JSON.stringify(res.data)}`);
+      throw new Error("Cart update failed");
     }
     const cart = res.data.carts[0]?.item;
     return {

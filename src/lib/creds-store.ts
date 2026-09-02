@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { openSync, fsyncSync, closeSync, renameSync } from "node:fs";
+import { openSync, fsyncSync, closeSync, renameSync, existsSync } from "node:fs";
 import {
   open,
   mkdir,
@@ -177,7 +177,7 @@ export async function readCredentials(
  * temp), and matches ONLY this store's validated pattern
  * `.<basename>.tmp.<pid>.<rand>` — so it can never delete another writer's temp.
  */
-export async function sweepOrphans(path: string): Promise<void> {
+async function sweepOrphans(path: string): Promise<void> {
   const dir = dirname(path);
   const pattern = orphanPattern(path);
   let entries: string[];
@@ -394,13 +394,22 @@ export function updateDeviceId(deviceId: string): Promise<CredentialsFile> {
  * not rotate the installation identity. Returns whether a file existed.
  */
 export async function clearCredentialsStore(): Promise<boolean> {
+  // File existence MUST be determined independently of parseability: a corrupt
+  // file parses to nothing but still holds secrets on disk and must be cleared.
+  const existed = existsSync(CONFIG.CREDS_PATH);
   return withCredentialsLock(async (ctx) => {
-    // Lenient: a corrupt file must still be clearable, even if device_id is lost.
-    const disk = await readCredentials(CONFIG.CREDS_PATH, true).catch(() => ({} as CredentialsFile));
-    const existed = Object.keys(disk).length > 0;
+    // Nothing on disk → nothing to clear; never manufacture an empty creds file.
     if (!existed) return false;
-    // Preserve device_id; drop every token/identity field.
-    const deviceOnly: CredentialsFile = disk.device_id ? { device_id: disk.device_id } : {};
+    // Best-effort recover device_id so logout doesn't rotate identity. A corrupt
+    // file yields no device_id — but we ALWAYS overwrite, never leave secrets.
+    let deviceId: string | undefined;
+    try {
+      const disk = await readCredentials(CONFIG.CREDS_PATH);
+      deviceId = disk.device_id;
+    } catch {
+      deviceId = undefined;
+    }
+    const deviceOnly: CredentialsFile = deviceId ? { device_id: deviceId } : {};
     await ctx.writeFull(deviceOnly);
     return true;
   });

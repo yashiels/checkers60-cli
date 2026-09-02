@@ -19,7 +19,6 @@ import { TokenManager, clearCredentials } from "../lib/credentials.js";
 import { initRuntime, resetRuntimeForTests } from "../lib/runtime.js";
 import {
   atomicWriteJson,
-  sweepOrphans,
   withCredentialsLock,
   updateBffToken,
   readCredentials,
@@ -96,7 +95,7 @@ describe("atomicWriteJson", () => {
   });
 });
 
-describe("sweepOrphans", () => {
+describe("orphan sweep (via withCredentialsLock)", () => {
   it("removes 0600 crash orphans matching the pattern, leaving other writers' temps", async () => {
     // A crash orphan for THIS store — created via the same 0600 mechanism.
     const orphan = join(tempDir, `.${basename(credsPath)}.tmp.99999.deadbeef`);
@@ -107,7 +106,9 @@ describe("sweepOrphans", () => {
     const otherLive = join(tempDir, ".other.json.tmp.1.abcdef");
     closeSync(openSync(otherLive, "wx", 0o600));
 
-    await sweepOrphans(credsPath);
+    // The sweep is only reachable while the lock is held; a no-op transaction
+    // triggers it before any temp of ours exists.
+    await withCredentialsLock(async () => undefined);
 
     expect(existsSync(orphan)).toBe(false);
     expect(existsSync(otherLive)).toBe(true);
@@ -184,6 +185,32 @@ describe("logout", () => {
     expect(disk.mobile).toBeUndefined();
     expect(disk.sixty60_user_id).toBeUndefined();
     expect(mode(credsPath)).toBe(0o600);
+  });
+
+  it("clears a CORRUPT file so no secrets remain, and reports cleared=true", async () => {
+    // A corrupt file that still holds a secret on disk. It parses to nothing,
+    // but logout MUST still overwrite it — never leave the secret behind.
+    writeFileSync(
+      credsPath,
+      '{ "device_id": "dev-xyz", "refresh_token": "secret-refresh" } trailing garbage'
+    );
+    const cleared = await clearCredentials();
+    // File existed, so logout reports cleared=true even though it was unparseable.
+    expect(cleared).toBe(true);
+    // No secret bytes survive anywhere in the file.
+    const raw = readFileSync(credsPath, "utf8");
+    expect(raw).not.toContain("secret-refresh");
+    // File is valid JSON again with no token/identity fields.
+    const disk = readDisk();
+    expect(disk.refresh_token).toBeUndefined();
+    expect(disk.user_token).toBeUndefined();
+    expect(mode(credsPath)).toBe(0o600);
+  });
+
+  it("returns false when no creds file exists", async () => {
+    rmSync(credsPath, { force: true });
+    const cleared = await clearCredentials();
+    expect(cleared).toBe(false);
   });
 });
 

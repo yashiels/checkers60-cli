@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
@@ -101,5 +102,43 @@ describe("CLI JSON mode — commander + error envelopes", () => {
     expect(parsed.code).toBe(3);
     // No response body / secret ever appears in the error field.
     expect(parsed.error).not.toMatch(/token|refresh/i);
+  });
+
+  it("logout --json emits {\"cleared\":false} and NO human text when logged out", async () => {
+    // A fresh, never-created path — and logout skips initRuntime, so nothing
+    // writes a device_id here first. The file genuinely does not exist.
+    const dir = mkdtempSync(join(tmpdir(), "checkers60-loggedout-"));
+    const freshPath = join(dir, "checkers60.json");
+    try {
+      const r = await runCli(["logout", "--json"], { CHECKERS60_CREDS_PATH: freshPath });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('{"cleared":false}');
+      // Exactly one JSON line; no chalk/human strings leak to stdout.
+      expect(r.stdout.trim().split("\n")).toHaveLength(1);
+      expect(r.stdout).not.toMatch(/Logged out|No saved tokens/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("logout succeeds on a CORRUPT creds file (initRuntime skipped) and strips secrets", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "checkers60-logout-"));
+    const corruptPath = join(dir, "checkers60.json");
+    // Corrupt (unparseable) creds carrying a secret; also no device_id, so if
+    // initRuntime ran it would throw CredentialsCorruptError and block logout.
+    writeFileSync(corruptPath, '{ "refresh_token": "supersecret" bad json');
+    try {
+      const r = await runCli(["logout", "--json"], {
+        CHECKERS60_CREDS_PATH: corruptPath,
+      });
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe('{"cleared":true}');
+      // The secret must be gone from disk; file is valid JSON again.
+      const after = readFileSync(corruptPath, "utf8");
+      expect(after).not.toContain("supersecret");
+      expect(() => JSON.parse(after)).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 }, 30000);

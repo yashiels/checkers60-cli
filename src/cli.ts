@@ -51,7 +51,7 @@ const program = new Command()
   .addOption(new Option("-q, --quiet", "suppress non-essential output").default(false))
   .addOption(new Option("-v, --verbose", "show extra debug info").default(false))
   .addOption(new Option("--json", "output machine-readable JSON").default(false))
-  .hook("preAction", async (thisCommand) => {
+  .hook("preAction", async (thisCommand, actionCommand) => {
     const opts = thisCommand.opts<{
       color?: boolean;
       quiet?: boolean;
@@ -67,7 +67,12 @@ const program = new Command()
     });
     // Resolve the per-install device id once, before any command action builds
     // headers or an API client. Runs after arg parse; not for --help/--version.
-    await initRuntime();
+    // `logout` makes no API calls and needs no device id — and a corrupt creds
+    // file would make resolveDeviceId throw, blocking the very command meant to
+    // clear it — so skip runtime init for logout.
+    if (actionCommand.name() !== "logout") {
+      await initRuntime();
+    }
   })
   .showHelpAfterError()
   .configureOutput({
@@ -164,10 +169,11 @@ Examples:
 program
   .command("logout")
   .description("Clear saved tokens")
+  .option("--json", "Output JSON", false)
   .action(
-    wrap(async () => {
+    wrap(async (opts: { json?: boolean }) => {
       const { logout } = await import("./commands/logout.js");
-      await logout();
+      await logout({ json: mergeJson(opts) });
     })
   );
 
