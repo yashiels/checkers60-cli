@@ -212,3 +212,34 @@ describe("cart --deals", () => {
     expect(JSON.stringify(parsed.deals)).not.toMatch(/\b\d+\s*of\s*\d+\b/i);
   });
 });
+
+// ── Oracle final-review regressions ──────────────────────────────────────
+describe("deal lookup failure is surfaced, not silently empty", () => {
+  it("cart --deals reports deals unavailable on a lookup error", async () => {
+    requestMock.mockImplementation((...args: unknown[]) => {
+      const url = String(args[1] ?? "");
+      if (url.includes("/products/filter")) {
+        return Promise.reject(new Error("network down"));
+      }
+      return routeRequest(...args);
+    });
+    const out = await captureStdout(() =>
+      cartCommand({ json: true, deals: true })
+    );
+    const parsed = JSON.parse(out);
+    // The lookup failed → deals must be empty AND dealsError set (not a false "no deals").
+    expect(parsed.deals).toEqual([]);
+    expect(parsed.dealsError).toBeTruthy();
+    expect(String(parsed.dealsError)).not.toMatch(/\{|\}|success/); // sanitized, no payload
+  });
+});
+
+describe("getProductDetail does not return an unrelated product", () => {
+  it("returns raw undefined when the requested id is absent", async () => {
+    // Fixture never contains this id; response has other products.
+    const api = new CheckersAPI();
+    const { raw, deals } = await api.getProductDetail("nonexistent-id-xyz");
+    expect(raw).toBeUndefined();
+    expect(deals).toEqual([]);
+  });
+});

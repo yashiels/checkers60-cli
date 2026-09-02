@@ -8,6 +8,7 @@ import {
 } from "../lib/api.js";
 import { formatRand } from "../lib/format.js";
 import { startSpinner } from "../lib/output.js";
+import { classifyError } from "../lib/errors.js";
 
 export interface CartOptions {
   json?: boolean;
@@ -35,9 +36,9 @@ async function resolveCartDeals(
   api: CheckersAPI,
   items: CartLineItem[],
   names: Map<string, string>
-): Promise<CartDeal[]> {
+): Promise<{ deals: CartDeal[]; error: string | null }> {
   const productIds = items.map((i) => i.productId);
-  if (productIds.length === 0) return [];
+  if (productIds.length === 0) return { deals: [], error: null };
 
   let products: Product[] = [];
   let dealList: BonusBuy[] = [];
@@ -45,8 +46,10 @@ async function resolveCartDeals(
     const res = await api.getProductsWithDeals(productIds);
     products = res.products;
     dealList = res.deals;
-  } catch {
-    return [];
+  } catch (err) {
+    // Never silently report "no deals" on a lookup failure — surface a
+    // sanitized reason so the caller can say deals are unavailable, not absent.
+    return { deals: [], error: classifyError(err).message };
   }
 
   const bonusByProduct = new Map<string, string[]>();
@@ -80,7 +83,7 @@ async function resolveCartDeals(
       });
     }
   }
-  return [...byDeal.values()];
+  return { deals: [...byDeal.values()], error: null };
 }
 
 /** Resolve product ids to display names (best-effort; tolerates failures). */
@@ -115,9 +118,9 @@ export async function cart(options: CartOptions = {}): Promise<void> {
     api,
     state.items.map((i) => i.productId)
   );
-  const cartDeals = withDeals
+  const { deals: cartDeals, error: dealsError } = withDeals
     ? await resolveCartDeals(api, state.items, names)
-    : [];
+    : { deals: [], error: null };
   spinner?.stop();
 
   if (json) {
@@ -134,7 +137,7 @@ export async function cart(options: CartOptions = {}): Promise<void> {
             quantity: i.quantity,
             price: i.price,
           })),
-          ...(withDeals ? { deals: cartDeals } : {}),
+          ...(withDeals ? { deals: cartDeals, dealsError } : {}),
         },
         null,
         2
@@ -175,11 +178,17 @@ export async function cart(options: CartOptions = {}): Promise<void> {
     `${chalk.bold(`  Total: ${formatRand(cartTotal(state.items))}`)} ${chalk.dim(`(${state.items.length} items)`)}\n\n`
   );
 
-  if (withDeals) printCartDeals(cartDeals);
+  if (withDeals) printCartDeals(cartDeals, dealsError);
 }
 
 /** Print the membership-only bonus-buy section for `cart --deals`. */
-function printCartDeals(cartDeals: CartDeal[]): void {
+function printCartDeals(cartDeals: CartDeal[], dealsError: string | null): void {
+  if (dealsError) {
+    process.stdout.write(
+      `${chalk.yellow(`  Bonus-buy deals unavailable: ${dealsError}`)}\n\n`
+    );
+    return;
+  }
   if (cartDeals.length === 0) {
     process.stdout.write(
       `${chalk.dim("  No bonus-buy deals apply to items in your cart.")}\n\n`

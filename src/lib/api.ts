@@ -430,7 +430,8 @@ export class CheckersAPI {
   /** Product detail for a single id plus only the deals that product belongs to. */
   async getProductDetail(id: string): Promise<ProductWithDeals> {
     const data = await this.productFilter([id]);
-    const raw = data.products?.find((p) => p.id === id) ?? data.products?.[0];
+    // Exact match only — never fall back to an unrelated product when the id is absent.
+    const raw = data.products?.find((p) => p.id === id);
     const allDeals = normalizeBonusBuys(data.bonusBuys);
     const belongs = new Set(
       Array.isArray(raw?.bonusBuyIds) ? (raw.bonusBuyIds as string[]) : []
