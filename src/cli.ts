@@ -235,6 +235,55 @@ Examples:
     })
   );
 
+// ── offers ─────────────────────────────────────────────────────────────
+program
+  .command("offers")
+  .description("List personalized bonus-buy offers (offers for you)")
+  .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 offers
+  $ checkers60 offers --json
+`
+  )
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { offers } = await import("./commands/offers.js");
+      await offers({ json: mergeJson(opts) });
+    })
+  );
+
+// ── discover ───────────────────────────────────────────────────────────
+program
+  .command("discover")
+  .description("Personalized promotions and featured products (promotions for you)")
+  .option("--member", "Force Xtra Savings member pricing")
+  .option("--guest", "Force non-member pricing")
+  .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Membership is derived from your profile's loyalty card unless --member/--guest is given.
+
+Examples:
+  $ checkers60 discover
+  $ checkers60 discover --member --json
+`
+  )
+  .action(
+    wrap(async (opts: { json?: boolean; member?: boolean; guest?: boolean }) => {
+      if (opts.member && opts.guest) {
+        throw new UsageError("Pass at most one of --member / --guest.");
+      }
+      const { discover } = await import("./commands/discover.js");
+      // Neither flag → undefined → derive membership from the profile.
+      const member = opts.member ? true : opts.guest ? false : undefined;
+      await discover({ json: mergeJson(opts), member });
+    })
+  );
+
 // ── show ───────────────────────────────────────────────────────────────
 program
   .command("show <id>")
@@ -596,13 +645,23 @@ Examples:
 
 // ── categories ─────────────────────────────────────────────────────────
 program
-  .command("categories")
-  .description("Browse product categories (not wired up yet — endpoint host TBD)")
+  .command("categories <query>")
+  .description("List product categories (department facets) for a search term")
   .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+The catalog exposes categories scoped to a search — there is no global tree.
+
+Examples:
+  $ checkers60 categories "milk"
+  $ checkers60 categories "coffee" --json
+`
+  )
   .action(
-    wrap(async (opts: { json?: boolean }) => {
+    wrap(async (query: string, opts: { json?: boolean }) => {
       const { categories } = await import("./commands/categories.js");
-      await categories({ json: mergeJson(opts) });
+      await categories(query, { json: mergeJson(opts) });
     })
   );
 

@@ -1,0 +1,40 @@
+{
+  "success": true,
+  "promotions": {
+    "PROMO-0001": {
+      "id": "PROMO-0001",
+      "code": "BB0001",
+      "promotionId": "PID-0001",
+      "name": "Buy 2 & Save 15%",
+      "shortDescription": "Buy any 2 selected cereals",
+      "longDescription": "Buy Any 2 Selected Cereals And Save 15%",
+      "discountType": { "code": "other" },
+      "discountValue": 0,
+      "memberType": { "code": "fox_members" },
+      "offerType": { "code": "bonus_buy" },
+      "startDate": 1700000000000,
+      "endDate": 1700000000000,
+      "imageId": "IMG-0001",
+      "products": ["ART-0001", "ART-0002"],
+      "productIds": ["PROD-0001", "PROD-0002"],
+      "channelIndicator": "sixty60"
+    },
+    "PROMO-0002": {
+      "id": "PROMO-0002",
+      "code": "BB0002",
+      "promotionId": "PID-0002",
+      "name": "Save R20 on selected coffee",
+      "shortDescription": "Selected coffee",
+      "longDescription": "Save R20 On Selected Coffee 250g",
+      "discountType": { "code": "other" },
+      "discountValue": 0,
+      "memberType": { "code": "all" },
+      "offerType": { "code": "bonus_buy" },
+      "startDate": 1700000000000,
+      "endDate": 1700000000000,
+      "products": ["ART-0003"],
+      "productIds": ["PROD-0003"],
+      "channelIndicator": "sixty60"
+    }
+  }
+}

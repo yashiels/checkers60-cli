@@ -1,0 +1,19 @@
+{
+  "success": true,
+  "message": "",
+  "filterOptions": {
+    "departmentOptions": [
+      { "displayCategoryId": "CAT-0001", "name": "Milk, Dairy & Eggs", "count": 27 },
+      { "displayCategoryId": "CAT-0002", "name": "Beverages, Juices & Cordials", "count": 46 },
+      { "displayCategoryId": "CAT-0003", "name": "Food Cupboard", "count": 34 }
+    ],
+    "brandOptions": [
+      { "name": "Clover", "count": 29 },
+      { "name": "Parmalat", "count": 10 }
+    ],
+    "facetOptions": [
+      { "attributeId": "ATTR-0001", "name": "Low Fat", "values": [{ "value": "Yes", "count": 36 }], "rank": 11 }
+    ],
+    "filterOutOfStock": false
+  }
+}

@@ -104,6 +104,22 @@ describe("CLI JSON mode — commander + error envelopes", () => {
     expect(parsed.error).not.toMatch(/token|refresh/i);
   });
 
+  it("discover --member --guest is a usage error (exit 2) before any network call", async () => {
+    const r = await runCli(["discover", "--member", "--guest", "--json"]);
+    expect(r.code).toBe(2);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed.code).toBe(2);
+    expect(parsed.error).toMatch(/at most one/i);
+  });
+
+  it("categories requires a <query> argument (exit 2 when omitted)", async () => {
+    const r = await runCli(["categories", "--json"]);
+    expect(r.code).toBe(2);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed.code).toBe(2);
+    expect(parsed.error).toMatch(/query/i);
+  });
+
   it("logout --json emits {\"cleared\":false} and NO human text when logged out", async () => {
     // A fresh, never-created path — and logout skips initRuntime, so nothing
     // writes a device_id here first. The file genuinely does not exist.

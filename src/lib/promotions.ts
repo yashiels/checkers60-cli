@@ -69,13 +69,28 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * `channelSpecificPromotions.sixty60`, its fields take precedence over the
  * top-level ones. In the live schema that key is usually a boolean channel flag,
  * in which case there is nothing to override and the top-level fields are used.
+ *
+ * The override is resolved per-field (never by spreading the raw envelope), so
+ * an override key present with any value wins — matching the previous merge
+ * semantics — while no unknown raw field can leak through.
  */
-function sixty60Source(raw: RawBonusBuy): RawBonusBuy {
+function sixty60Override(raw: RawBonusBuy): Partial<RawBonusBuy> {
   const override = raw.channelSpecificPromotions?.sixty60;
-  if (isPlainObject(override)) {
-    return { ...raw, ...(override as Partial<RawBonusBuy>) };
-  }
-  return raw;
+  return isPlainObject(override) ? (override as Partial<RawBonusBuy>) : {};
+}
+
+/** Pick a field from the sixty60 override when it declares the key, else the raw value. */
+function preferred<K extends keyof RawBonusBuy>(
+  override: Partial<RawBonusBuy>,
+  raw: RawBonusBuy,
+  key: K
+): RawBonusBuy[K] {
+  return (key in override ? override[key] : raw[key]) as RawBonusBuy[K];
+}
+
+/** Copy an array of strings, dropping any non-string entry (never aliases the raw array). */
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
 
 function isoOrUndefined(epochMs?: number): string | undefined {
@@ -86,23 +101,25 @@ function isoOrUndefined(epochMs?: number): string | undefined {
 
 /** Normalize one raw bonus-buy deal into the CLI's {@link BonusBuy} shape. */
 export function normalizeBonusBuy(raw: RawBonusBuy): BonusBuy {
-  const src = sixty60Source(raw);
+  const ov = sixty60Override(raw);
+  const p = <K extends keyof RawBonusBuy>(key: K) => preferred(ov, raw, key);
+  const discountValue = p("discountValue");
   return {
-    id: src.id,
-    code: src.code,
-    promotionId: src.promotionId,
-    title: src.name ?? "",
-    description: src.longDescription ?? src.shortDescription ?? src.name ?? "",
-    discountTypeCode: src.discountType?.code,
-    discountValue: typeof src.discountValue === "number" ? src.discountValue : undefined,
-    membersOnly: src.memberType?.code === "fox_members",
-    offerTypeCode: src.offerType?.code,
-    startDate: src.startDate,
-    endDate: src.endDate,
-    validUntil: isoOrUndefined(src.endDate),
-    memberProductIds: Array.isArray(src.productIds) ? src.productIds : [],
-    memberArticleNumbers: Array.isArray(src.products) ? src.products : [],
-    channelIndicator: src.channelIndicator,
+    id: p("id"),
+    code: p("code"),
+    promotionId: p("promotionId"),
+    title: p("name") ?? "",
+    description: p("longDescription") ?? p("shortDescription") ?? p("name") ?? "",
+    discountTypeCode: p("discountType")?.code,
+    discountValue: typeof discountValue === "number" ? discountValue : undefined,
+    membersOnly: p("memberType")?.code === "fox_members",
+    offerTypeCode: p("offerType")?.code,
+    startDate: p("startDate"),
+    endDate: p("endDate"),
+    validUntil: isoOrUndefined(p("endDate")),
+    memberProductIds: stringList(p("productIds")),
+    memberArticleNumbers: stringList(p("products")),
+    channelIndicator: p("channelIndicator"),
   };
 }
 

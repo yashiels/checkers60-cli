@@ -193,6 +193,36 @@ export interface RawCompletedOrder {
   orderDelivery?: unknown;
 }
 
+/** Raw personalized-offers envelope (`offers-for-you`): a bonus-buy map. */
+export interface RawOffersForYou {
+  promotions?: Record<string, RawBonusBuy>;
+}
+
+/** Raw personalized-promotions envelope (`promotions/forYou`): deals + products. */
+export interface RawPromotionsForYou {
+  bonusBuys?: RawBonusBuy[];
+  items?: RawCatalogProduct[];
+}
+
+/** Raw department facet from `filter/options` (a search-scoped category). */
+export interface RawDepartmentOption {
+  displayCategoryId?: string;
+  id?: string;
+  name?: string;
+  count?: number;
+}
+
+/** Raw `filter/options` envelope — only the department facets are read. */
+export interface RawFilterOptions {
+  filterOptions?: { departmentOptions?: RawDepartmentOption[] };
+}
+
+/** One loyalty card as returned inside the DSL profile. Only membership is derived. */
+export interface RawLoyaltyCard {
+  active?: boolean;
+  theme?: string;
+}
+
 export interface RawFirstDeliverySlots {
   allowASAPDelivery?: boolean;
   firstAvailableSlotSixtyMin?: { startTime?: string; endTime?: string } | null;
@@ -787,6 +817,92 @@ export class CheckersAPI {
       { headers, json: { storeContexts }, retry: "safe" }
     );
     return res.data ?? {};
+  }
+
+  // ── Discovery & offers (catalog.sixty60.co.za) ──────────────────────────
+
+  /**
+   * Personalized offers ("offers for you"). The catalog returns a bonus-buy map
+   * under `promotions` (same shape as a search's `bonusBuys`). Raw; discovery.ts
+   * normalizes it with the shared bonus-buy normalizer.
+   */
+  async getOffersForYou(stores?: StoreContext[]): Promise<RawOffersForYou> {
+    const session = await this.session();
+    const headers = this.sixty60Headers(session, stores);
+    const storeContexts = stores ?? CONFIG.DEFAULT_STORES;
+    const res = await request<RawOffersForYou>(
+      "POST",
+      `${CONFIG.CATALOG_API}/api/v1/products/offers-for-you`,
+      { headers, json: { storeContexts, userId: session.userId }, retry: "safe" }
+    );
+    return res.data ?? {};
+  }
+
+  /**
+   * Personalized promotions ("promotions for you"): bonus-buy deals plus the
+   * products they surface. `isXtraSavingsMember` is a required query flag (pass
+   * the profile-derived value from {@link isXtraSavingsMember}). Raw; discovery.ts
+   * maps deals via the shared normalizer and products to a minimal DTO.
+   */
+  async getPromotionsForYou(
+    isXtraSavingsMember: boolean,
+    stores?: StoreContext[]
+  ): Promise<RawPromotionsForYou> {
+    const session = await this.session();
+    const headers = this.sixty60Headers(session, stores);
+    const csv = storeIdList(stores);
+    const url =
+      `${CONFIG.CATALOG_API}/api/v1/retrieve/products/promotions/forYou` +
+      `?storeIds=${encodeURIComponent(csv)}` +
+      `&userId=${encodeURIComponent(session.userId)}` +
+      `&isXtraSavingsMember=${isXtraSavingsMember}`;
+    const res = await request<RawPromotionsForYou>("GET", url, { headers, retry: "safe" });
+    return res.data ?? {};
+  }
+
+  /**
+   * Search-scoped filter facets. Only the department facets are read (categories).
+   * The body is FLAT (source + storeContexts at the top level — the nested
+   * `filter` wrapper used by `/products/filter` returns 400 here). An empty query
+   * yields no departments, so callers must pass a real search term.
+   */
+  async getFilterOptions(
+    query: string,
+    stores?: StoreContext[]
+  ): Promise<RawFilterOptions> {
+    const session = await this.session();
+    const headers = this.sixty60Headers(session, stores);
+    const storeContexts = stores ?? CONFIG.DEFAULT_STORES;
+    const res = await request<RawFilterOptions>(
+      "POST",
+      `${CONFIG.CATALOG_API}/api/v4/products/filter/options`,
+      {
+        headers,
+        json: {
+          productListSource: { search: query },
+          storeContexts,
+          userId: session.userId,
+          location: CONFIG.USER_LOCATION,
+        },
+        retry: "safe",
+      }
+    );
+    return res.data ?? {};
+  }
+
+  /**
+   * Best-effort Xtra Savings membership, derived from the DSL profile: true when
+   * an ACTIVE Checkers/Xtra loyalty card is present. Only a boolean is returned —
+   * the PII-bearing profile never escapes this method.
+   */
+  async isXtraSavingsMember(): Promise<boolean> {
+    const profile = await this.getUserProfile();
+    const cards = (profile as { loyaltyCards?: { cards?: RawLoyaltyCard[] } } | undefined)
+      ?.loyaltyCards?.cards;
+    if (!Array.isArray(cards)) return false;
+    return cards.some(
+      (c) => c?.active === true && /checkers|xtra/i.test(typeof c.theme === "string" ? c.theme : "")
+    );
   }
 
   // ── Delivery slots (via pre-order; orders-api) ──────────────────────────

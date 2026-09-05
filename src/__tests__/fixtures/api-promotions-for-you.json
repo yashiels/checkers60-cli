@@ -1,0 +1,39 @@
+{
+  "success": true,
+  "bonusBuys": [
+    {
+      "id": "PROMO-0003",
+      "code": "BB0003",
+      "promotionId": "PID-0003",
+      "name": "Buy 3 & Save 25%",
+      "shortDescription": "Selected snacks",
+      "longDescription": "Buy Any 3 Selected Snacks And Save 25%",
+      "discountType": { "code": "other" },
+      "discountValue": 0,
+      "memberType": { "code": "fox_members" },
+      "offerType": { "code": "bonus_buy" },
+      "startDate": 1700000000000,
+      "endDate": 1700000000000,
+      "products": ["ART-0004"],
+      "productIds": ["PROD-0004"],
+      "channelIndicator": "sixty60"
+    }
+  ],
+  "items": [
+    {
+      "id": "PROD-0004",
+      "name": "Simple Truth Snack Bar 40g",
+      "displayName": "Simple Truth Snack Bar 40g",
+      "priceWithoutDecimal": 1299,
+      "imageId": "IMG-0004",
+      "bonusBuyIds": ["PROMO-0003"]
+    },
+    {
+      "id": "PROD-0005",
+      "name": "Crystal Valley Yoghurt 1kg",
+      "displayName": "Crystal Valley Yoghurt 1kg",
+      "priceWithoutDecimal": 3499,
+      "imageId": "IMG-0005"
+    }
+  ]
+}
