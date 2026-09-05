@@ -105,6 +105,38 @@ export interface FavouriteDTO {
   price: number | null;
 }
 
+/**
+ * A backup/alternative product (`backup <productId>`), resolved via the catalog.
+ * `imageId` is always present (nullable) so the DTO's key set is fixed.
+ */
+export interface BackupProductDTO {
+  productId: string;
+  name: string;
+  /** Price in cents, or null when the catalog did not resolve the product. */
+  price: number | null;
+  /** Catalog image id, or null. */
+  imageId: string | null;
+}
+
+/**
+ * A deferred cart-reads feature. Two of the domain's endpoints have no captured
+ * READ-only contract in this app version — `smart-cart/recommendations` is 404
+ * on every host, and `carts/have-you-forgotten` only answers a mutation-adjacent
+ * POST — so those commands recognize the request but defer (no network call, no
+ * guessed body), mirroring `slots --mode hyper`.
+ */
+export interface DeferredCartDTO {
+  feature: "forgotten" | "suggest";
+  supported: false;
+  message: string;
+}
+
+export const CART_FORGOTTEN_DEFERRED_MESSAGE =
+  "cart 'have you forgotten' suggestions — no read-only contract captured in this app version";
+
+export const CART_SUGGEST_DEFERRED_MESSAGE =
+  "smart-cart recommendations — endpoint not available in this app version";
+
 /** One returned item within a return group. */
 export interface ReturnItemDTO {
   productId: string | null;
@@ -339,6 +371,25 @@ export function mapFavourite(product: RawCatalogProduct): FavouriteDTO {
   };
 }
 
+export function mapBackupProduct(product: RawCatalogProduct): BackupProductDTO {
+  return {
+    productId: product.id ?? "",
+    name: product.name ?? product.displayName ?? "",
+    price: typeof product.priceWithoutDecimal === "number" ? product.priceWithoutDecimal : null,
+    imageId: typeof product.imageId === "string" ? product.imageId : null,
+  };
+}
+
+/** The fixed `cart forgotten` deferral DTO (no network call, no guess). */
+export function forgottenDeferredDTO(): DeferredCartDTO {
+  return { feature: "forgotten", supported: false, message: CART_FORGOTTEN_DEFERRED_MESSAGE };
+}
+
+/** The fixed `cart suggest` deferral DTO (no network call, no guess). */
+export function suggestDeferredDTO(): DeferredCartDTO {
+  return { feature: "suggest", supported: false, message: CART_SUGGEST_DEFERRED_MESSAGE };
+}
+
 function mapReturnItem(raw: RawReturnItem): ReturnItemDTO {
   return {
     productId: raw.productId ?? null,
@@ -534,6 +585,36 @@ export async function getFavourites(
     .filter((id): id is string => Boolean(id));
   if (ids.length === 0) return [];
   return (await api.getProductDetails(ids)).map(mapFavourite);
+}
+
+/**
+ * Backup/alternative products for one product id. Only the alternatives the API
+ * associates with THIS product are used (`alternativeProductIdMap[productId]` —
+ * never a flatten across other products' recommendations). The source id itself
+ * is dropped (it is never its own backup), ids are deduplicated, their catalog
+ * details fetched, then mapped back in the API's original order; catalog rows
+ * for unrequested ids are ignored.
+ */
+export async function getBackups(
+  productId: string,
+  api: CheckersAPI = new CheckersAPI()
+): Promise<BackupProductDTO[]> {
+  const map = await api.getUserAlternatives(productId);
+  const raw = Array.isArray(map[productId]) ? map[productId] : [];
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const id of raw) {
+    if (typeof id === "string" && id.length > 0 && id !== productId && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  if (ids.length === 0) return [];
+  const products = await api.getProductDetails(ids);
+  const byId = new Map(products.map((p) => [p.id, p]));
+  return ids
+    .filter((id) => byId.has(id))
+    .map((id) => mapBackupProduct(byId.get(id) as RawCatalogProduct));
 }
 
 function collectReturnGroups(raw: {

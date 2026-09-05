@@ -304,15 +304,66 @@ Examples:
   );
 
 // ── cart ───────────────────────────────────────────────────────────────
-program
+const cartCmd = program
   .command("cart")
   .description("Show cart contents")
   .option("--deals", "Show which cart items qualify for bonus-buy deals", false)
   .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 cart
+  $ checkers60 cart forgotten          # products you usually buy but haven't added
+  $ checkers60 cart suggest            # smart-cart recommendations
+`
+  )
   .action(
     wrap(async (opts: { deals?: boolean; json?: boolean }) => {
       const { cart } = await import("./commands/cart.js");
       await cart({ json: mergeJson(opts), deals: opts.deals });
+    })
+  );
+
+cartCmd
+  .command("forgotten")
+  .description("Products you usually buy but haven't added this time")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { cartForgotten } = await import("./commands/cart-reads.js");
+      await cartForgotten({ json: mergeJson(opts) });
+    })
+  );
+
+cartCmd
+  .command("suggest")
+  .alias("suggestions")
+  .description("Smart-cart product recommendations")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { cartSuggest } = await import("./commands/cart-reads.js");
+      await cartSuggest({ json: mergeJson(opts) });
+    })
+  );
+
+// ── backup ─────────────────────────────────────────────────────────────
+program
+  .command("backup <productId>")
+  .description("Show replacement/backup candidates for a product")
+  .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 backup 5d3af63bf434cf8420737dd6
+`
+  )
+  .action(
+    wrap(async (productId: string, opts: { json?: boolean }) => {
+      const { backup } = await import("./commands/cart-reads.js");
+      await backup(productId, { json: mergeJson(opts) });
     })
   );
 

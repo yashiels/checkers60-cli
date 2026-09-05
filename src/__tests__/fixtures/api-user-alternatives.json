@@ -1,0 +1,7 @@
+{
+  "success": true,
+  "alternativeProductIdMap": {
+    "PROD-0001": ["PROD-0002", "PROD-0003", "PROD-0002"],
+    "PROD-9999": ["PROD-0004"]
+  }
+}

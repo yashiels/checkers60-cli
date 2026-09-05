@@ -784,6 +784,29 @@ export class CheckersAPI {
   }
 
   /**
+   * Backup/replacement candidates for a product. Served by the CATALOG host as
+   * `POST /api/v1/products/user-alternatives`; the body carries the product ids
+   * and store contexts. The response is a map of requested-product-id →
+   * alternative product ids. A missing/malformed map is normalized to `{}` so
+   * callers never see `undefined`. Only ids are returned here — orders.ts
+   * resolves names/prices/images via the catalog and maps an allowlisted DTO.
+   */
+  async getUserAlternatives(
+    productId: string,
+    stores?: StoreContext[]
+  ): Promise<Record<string, string[]>> {
+    const headers = await this.headers(stores);
+    const storeContexts = stores ?? CONFIG.DEFAULT_STORES;
+    const res = await request<{ alternativeProductIdMap?: Record<string, string[]> }>(
+      "POST",
+      `${CONFIG.CATALOG_API}/api/v1/products/user-alternatives`,
+      { headers, json: { productIds: [productId], storeContexts }, retry: "safe" }
+    );
+    const map = res.data?.alternativeProductIdMap;
+    return map && typeof map === "object" ? map : {};
+  }
+
+  /**
    * Return groups for the account. Served by the RETURNS host. Raw; orders.ts
    * maps to an allowlisted DTO (redaction proven via synthetic poison fixtures).
    */
