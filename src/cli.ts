@@ -537,6 +537,63 @@ Examples:
     })
   );
 
+// ── plus / membership ────────────────────────────────────────────────────
+program
+  .command("plus")
+  .alias("membership")
+  .description("Show Xtra Savings membership status")
+  .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 plus
+  $ checkers60 membership --json
+`
+  )
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { plus } = await import("./commands/plus.js");
+      await plus({ json: mergeJson(opts) });
+    })
+  );
+
+// ── wallet / credits ─────────────────────────────────────────────────────
+program
+  .command("wallet")
+  .alias("credits")
+  .description("Show your account wallet/credit balance")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { wallet } = await import("./commands/wallet.js");
+      await wallet({ json: mergeJson(opts) });
+    })
+  );
+
+// ── checkout (preview only) ──────────────────────────────────────────────
+program
+  .command("checkout")
+  .description("Preview order totals (--preview required; not supported yet)")
+  .option("--preview", "Preview totals only — required in this version", false)
+  .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Read-only: this CLI never places an order. Totals preview needs the pre-order
+totals contract, which is not captured yet, so --preview reports "not supported".
+
+Examples:
+  $ checkers60 checkout --preview
+`
+  )
+  .action(
+    wrap(async (opts: { preview?: boolean; json?: boolean }) => {
+      const { checkout } = await import("./commands/checkout.js");
+      await checkout({ preview: opts.preview, json: mergeJson(opts) });
+    })
+  );
+
 // ── categories ─────────────────────────────────────────────────────────
 program
   .command("categories")

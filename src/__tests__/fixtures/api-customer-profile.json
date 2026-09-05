@@ -1,0 +1,11 @@
+{
+  "userProfile": {
+    "IsXtraSavingsCustomer": true,
+    "xTraSavingsCardNumber": "XS-CARD-0001",
+    "account": {
+      "balanceAmount": 12345,
+      "balanceFactor": 100
+    },
+    "addresses": []
+  }
+}

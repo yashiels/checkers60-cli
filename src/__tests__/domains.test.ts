@@ -12,6 +12,7 @@ const completedOrdersFixture = loadFixture("api-completed-orders.json");
 const firstSlotsFixture = loadFixture("api-first-delivery-slots.json");
 const returnGroupsFixture = loadFixture("api-return-groups.json");
 const favouritesFixture = loadFixture("api-favourites.json");
+const customerProfileFixture = loadFixture("api-customer-profile.json");
 
 // ── request mock (branch by URL) ─────────────────────────────────────────
 const requestMock = vi.fn();
@@ -50,8 +51,12 @@ import {
   mapReturnGroup,
   mapAddress,
   mapFirstDeliverySlots,
+  mapMembership,
+  mapWallet,
+  checkoutPreviewDTO,
   resolveServiceOption,
   HYPER_DEFERRED_MESSAGE,
+  CHECKOUT_PREVIEW_DEFERRED_MESSAGE,
   DELIVERY_MODES,
   getRegulars,
   getReorderPreview,
@@ -61,6 +66,8 @@ import {
   getReturnDetail,
   getFavourites,
   getSlots,
+  getMembership,
+  getWallet,
 } from "../lib/orders.js";
 import { classifyError, UsageError, EXIT_USAGE } from "../lib/errors.js";
 import { initRuntime, resetRuntimeForTests } from "../lib/runtime.js";
@@ -72,6 +79,9 @@ import { returns as returnsCommand, returnsShow } from "../commands/returns.js";
 import { fav as favCommand } from "../commands/fav.js";
 import { addresses as addressesCommand } from "../commands/addresses.js";
 import { slots as slotsCommand } from "../commands/slots.js";
+import { plus as plusCommand } from "../commands/plus.js";
+import { wallet as walletCommand } from "../commands/wallet.js";
+import { checkout as checkoutCommand } from "../commands/checkout.js";
 
 const origEnvDeviceId = process.env.CHECKERS60_DEVICE_ID;
 
@@ -114,6 +124,8 @@ const POISON = {
   maskedCardNumber: "POISON_CARD_4111",
   loyalty: { xtraSavingsId: "POISON_SAID", saId: "POISON_SAID" },
   loyaltyId: "POISON_LOYALTY",
+  xtraSavingsAccessToken: "POISON_XS_ACCESS",
+  xtraSavingsIdToken: "POISON_XS_ID",
   idNumber: "POISON_SAID",
   saId: "POISON_SAID",
   email: "POISON_EMAIL@example.com",
@@ -139,6 +151,8 @@ const FORBIDDEN = [
   "POISON_CARD_4111",
   "POISON_SAID",
   "POISON_LOYALTY",
+  "POISON_XS_ACCESS",
+  "POISON_XS_ID",
   "POISON_EMAIL@example.com",
   "POISON_SIGNED_TOKEN",
   "POISON_SIGNATURE",
@@ -189,7 +203,7 @@ function routeRequest(...args: unknown[]) {
   if (url.includes("/first-delivery-slots")) return ok(firstSlotsFixture);
   if (url.includes("/return-groups/app/user")) return ok(returnGroupsFixture);
   if (url.includes("/products/favourites")) return ok(favouritesFixture);
-  if (url.includes("customer-profile/v2")) return ok({ userProfile: { addresses: [] } });
+  if (url.includes("customer-profile/v2")) return ok(customerProfileFixture);
   if (url.includes("/products/filter")) {
     const ids = opts.json?.filter?.productListSource?.productIds ?? [];
     return ok(catalogFor(ids));
@@ -315,6 +329,9 @@ function poisonRouter(...args: unknown[]) {
   if (url.includes("customer-profile/v2")) {
     return ok({
       userProfile: {
+        IsXtraSavingsCustomer: true,
+        xTraSavingsCardNumber: "XS-CARD-0001",
+        account: { balanceAmount: 12345, balanceFactor: 100, transactions: [POISON], ...POISON },
         addresses: [{ _id: "a1", name: "Home", city: "Cape Town", ...POISON }],
         ...POISON,
       },
@@ -498,6 +515,35 @@ describe("DTO mappers redact all PII/secrets (synthetic poison inputs)", () => {
       expectKeys(d, ["mode", "storeId", "from", "to", "available", "asap", "deliveryFee", "minimumOrderValue"]);
     });
   });
+
+  it("mapMembership (keeps flag + own card number; drops XS tokens/PII)", () => {
+    const dto = mapMembership({
+      IsXtraSavingsCustomer: true,
+      xTraSavingsCardNumber: "XS-CARD-0001",
+      account: { balanceAmount: 5000, balanceFactor: 100, ...POISON },
+      ...POISON,
+    } as never);
+    assertClean(dto);
+    expectKeys(dto, ["isMember", "memberNumber", "lifetimeSavings"]);
+    expect(dto).toEqual({ isMember: true, memberNumber: "XS-CARD-0001", lifetimeSavings: null });
+  });
+
+  it("mapWallet (balance in cents from account.balanceAmount; drops PII/tokens)", () => {
+    const dto = mapWallet({
+      account: { balanceAmount: 5000, balanceFactor: 100, ...POISON },
+      ...POISON,
+    } as never);
+    assertClean(dto);
+    expectKeys(dto, ["balance", "currency"]);
+    expect(dto).toEqual({ balance: 5000, currency: "ZAR" });
+  });
+
+  it("mapWallet reports a MISSING balance as null (never 0)", () => {
+    const dto = mapWallet({ account: {}, ...POISON } as never);
+    expect(dto.balance).toBeNull();
+    const noAccount = mapWallet({ ...POISON } as never);
+    expect(noAccount.balance).toBeNull();
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════
@@ -548,6 +594,20 @@ describe("real fixtures parse to allowlisted DTOs", () => {
   it("favourites: empty fixture → []", async () => {
     const dtos = await getFavourites();
     expect(dtos).toEqual([]);
+  });
+
+  it("membership: customer-profile/v2 → MembershipDTO", async () => {
+    const dto = await getMembership();
+    expectKeys(dto, ["isMember", "memberNumber", "lifetimeSavings"]);
+    expect(dto).toEqual({ isMember: true, memberNumber: "XS-CARD-0001", lifetimeSavings: null });
+    assertClean(dto);
+  });
+
+  it("wallet: customer-profile/v2 account → WalletDTO (cents)", async () => {
+    const dto = await getWallet();
+    expectKeys(dto, ["balance", "currency"]);
+    expect(dto).toEqual({ balance: 12345, currency: "ZAR" });
+    assertClean(dto);
   });
 });
 
@@ -645,6 +705,41 @@ describe("slots --mode hyper is deferred", () => {
     expect(DELIVERY_MODES).toContain("hyper");
     expect(resolveServiceOption("sixty-min")).toBe("sixty-min-delivery");
     expect(resolveServiceOption("one-day")).toBe("one-day-delivery");
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// checkout --preview is deferred: preview-only, no network, no order
+// ════════════════════════════════════════════════════════════════════════
+describe("checkout --preview is deferred (read-only, no place-order)", () => {
+  it("without --preview: UsageError (exit 2) and NO request", async () => {
+    let thrown: unknown;
+    try {
+      await checkoutCommand({ json: true });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(UsageError);
+    expect(classifyError(thrown).code).toBe(EXIT_USAGE);
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+
+  it("with --preview: emits the deferral DTO and makes NO request", async () => {
+    const out = await captureStdout(() => checkoutCommand({ preview: true, json: true }));
+    const parsed = JSON.parse(out);
+    expectKeys(parsed, ["preview", "supported", "message"]);
+    expect(parsed.preview).toBe(true);
+    expect(parsed.supported).toBe(false);
+    expect(parsed.message).toBe(CHECKOUT_PREVIEW_DEFERRED_MESSAGE);
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+
+  it("checkoutPreviewDTO is the fixed deferral shape", () => {
+    expect(checkoutPreviewDTO()).toEqual({
+      preview: true,
+      supported: false,
+      message: CHECKOUT_PREVIEW_DEFERRED_MESSAGE,
+    });
   });
 });
 
@@ -797,5 +892,24 @@ describe("command --json output is clean end-to-end (poisoned API responses)", (
         "minimumOrderValue",
       ])
     );
+  });
+
+  it("plus: poisoned profile (XS tokens/PII) → clean MembershipDTO", async () => {
+    const out = await captureStdout(() => plusCommand({ json: true }));
+    const parsed = JSON.parse(out);
+    assertClean(parsed);
+    expectKeys(parsed, ["isMember", "memberNumber", "lifetimeSavings"]);
+    expect(parsed.isMember).toBe(true);
+    expect(parsed.memberNumber).toBe("XS-CARD-0001");
+    expect(parsed.lifetimeSavings).toBeNull();
+  });
+
+  it("wallet: poisoned profile (account/tokens/PII) → clean WalletDTO", async () => {
+    const out = await captureStdout(() => walletCommand({ json: true }));
+    const parsed = JSON.parse(out);
+    assertClean(parsed);
+    expectKeys(parsed, ["balance", "currency"]);
+    expect(parsed.balance).toBe(12345);
+    expect(parsed.currency).toBe("ZAR");
   });
 });

@@ -203,6 +203,24 @@ export interface RawFirstDeliverySlots {
   >;
 }
 
+/** Account balances from customer-profile/v2. Amounts are cents (balanceFactor 100). */
+export interface RawAccountBalances {
+  balanceAmount?: number;
+  balanceFactor?: number;
+}
+
+/**
+ * Membership + wallet slice of the customer-profile/v2 `userProfile`. Only the
+ * fields orders.ts maps into a DTO are typed here; the same envelope carries
+ * secrets (xtraSavingsAccessToken/IdToken), payment info, email and full-PII
+ * addresses that the mapper never reads.
+ */
+export interface RawCustomerProfile {
+  IsXtraSavingsCustomer?: boolean;
+  xTraSavingsCardNumber?: string;
+  account?: RawAccountBalances;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Generate a MongoDB-style ObjectId (matches the app's line-item ids). */
@@ -635,6 +653,28 @@ export class CheckersAPI {
       }
     );
     return res.data?.userProfile?.addresses ?? [];
+  }
+
+  /**
+   * Membership + wallet slice of the customer profile. RE-FETCHES
+   * `customer-profile/v2` (same contract as {@link getAddresses}: Bearer static
+   * PROFILE_TOKEN, session token in the path → sensitivePathTail + redirect
+   * manual) and returns the raw `userProfile`. orders.ts maps only the
+   * allowlisted membership/balance fields; the profile is never persisted.
+   */
+  async getCustomerProfile(): Promise<RawCustomerProfile> {
+    const session = await this.session();
+    const res = await request<{ userProfile?: RawCustomerProfile }>(
+      "GET",
+      `${CONFIG.AUTH_BASE}/customers/${encodeURIComponent(session.customerId)}/customer-profile/v2/${session.sessionToken}`,
+      {
+        headers: this.profileHeaders(),
+        sensitivePathTail: true,
+        redirect: "manual",
+        retry: "safe",
+      }
+    );
+    return res.data?.userProfile ?? {};
   }
 
   /**

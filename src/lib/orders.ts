@@ -2,6 +2,7 @@ import {
   CheckersAPI,
   type RawCatalogProduct,
   type RawCompletedOrder,
+  type RawCustomerProfile,
   type RawFirstDeliverySlots,
   type RawOrderItem,
   type RawUserProductScore,
@@ -172,6 +173,47 @@ export interface SlotDTO {
   minimumOrderValue: number | null;
 }
 
+/**
+ * Xtra Savings membership status. `memberNumber` is the account's OWN loyalty
+ * card number (what identifies the member to themselves) — never the Xtra
+ * Savings access/id tokens, which are secrets and never mapped. `lifetimeSavings`
+ * has no field in customer-profile/v2 (only feature flags), so it is always null
+ * this increment rather than guessed from an uncaptured endpoint.
+ */
+export interface MembershipDTO {
+  isMember: boolean;
+  memberNumber: string | null;
+  lifetimeSavings: number | null;
+}
+
+/**
+ * Account wallet balance. `balance` is the API-reported account balance in cents
+ * (customer-profile/v2 `account.balanceAmount`, balanceFactor 100), or null when
+ * the field is absent — never coerced to 0, so "unknown" is not reported as
+ * "empty". Named sub-buckets (voucher, xCash, service-guarantee) are NOT summed
+ * in without proven aggregation semantics.
+ */
+export interface WalletDTO {
+  balance: number | null;
+  currency: string;
+}
+
+/**
+ * `checkout --preview` output. A read-only order-totals preview needs the
+ * pre-order totals contract, which was NOT captured (pre-order only returns
+ * totals for a populated cart, and no write may populate one). So the command
+ * emits this fixed deferral — no network call, and absolutely no place-order,
+ * tip, or payment. Mirrors the Hyper-slots deferral.
+ */
+export interface CheckoutPreviewDTO {
+  preview: true;
+  supported: false;
+  message: string;
+}
+
+export const CHECKOUT_PREVIEW_DEFERRED_MESSAGE =
+  "checkout totals preview — not supported yet (pre-order totals contract not captured)";
+
 // ─── Narrow raw input views (read-only; consumed only by the mappers) ────────
 
 interface RawGroupOrder {
@@ -325,6 +367,34 @@ export function mapAddress(raw: RawAddress): AddressDTO {
     id: raw._id ?? raw.identifier ?? "",
     name: raw.name ?? "",
     city: raw.city ?? null,
+  };
+}
+
+export function mapMembership(raw: RawCustomerProfile): MembershipDTO {
+  return {
+    isMember: raw.IsXtraSavingsCustomer === true,
+    memberNumber:
+      typeof raw.xTraSavingsCardNumber === "string" && raw.xTraSavingsCardNumber.length > 0
+        ? raw.xTraSavingsCardNumber
+        : null,
+    lifetimeSavings: null,
+  };
+}
+
+export function mapWallet(raw: RawCustomerProfile): WalletDTO {
+  const balance = raw.account?.balanceAmount;
+  return {
+    balance: typeof balance === "number" ? balance : null,
+    currency: "ZAR",
+  };
+}
+
+/** The fixed `checkout --preview` deferral DTO (no network call, no guess). */
+export function checkoutPreviewDTO(): CheckoutPreviewDTO {
+  return {
+    preview: true,
+    supported: false,
+    message: CHECKOUT_PREVIEW_DEFERRED_MESSAGE,
   };
 }
 
@@ -505,4 +575,16 @@ export async function getSlots(
 ): Promise<SlotDTO[]> {
   const raw = await api.getFirstDeliverySlots();
   return mapFirstDeliverySlots(raw, CONFIG.DEFAULT_STORES, resolveServiceOption(mode));
+}
+
+export async function getMembership(
+  api: CheckersAPI = new CheckersAPI()
+): Promise<MembershipDTO> {
+  return mapMembership(await api.getCustomerProfile());
+}
+
+export async function getWallet(
+  api: CheckersAPI = new CheckersAPI()
+): Promise<WalletDTO> {
+  return mapWallet(await api.getCustomerProfile());
 }
