@@ -7,7 +7,7 @@ vi.mock("../lib/http.js", async (importOriginal) => {
 });
 
 import { CheckersAPI } from "../lib/api.js";
-import type { TokenManager } from "../lib/credentials.js";
+import type { TokenManager, SessionContext } from "../lib/credentials.js";
 import { initRuntime, resetRuntimeForTests } from "../lib/runtime.js";
 
 const origEnvDeviceId = process.env.CHECKERS60_DEVICE_ID;
@@ -26,8 +26,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+function fakeSession(): SessionContext {
+  return {
+    sessionToken: "session-tok",
+    userId: "user-id",
+    uuid: "shoprite-uuid",
+    mobile: "+27000000000",
+    customerId: "000C3V55",
+  };
+}
+
 function fakeTokens(): TokenManager {
-  return { getUserToken: vi.fn().mockResolvedValue("user-tok") } as unknown as TokenManager;
+  return { getSession: vi.fn().mockResolvedValue(fakeSession()) } as unknown as TokenManager;
 }
 
 describe("CheckersAPI.updateCart error message", () => {

@@ -21,8 +21,14 @@ vi.mock("../lib/credentials.js", async (importOriginal) => {
   return {
     ...actual,
     TokenManager: class {
-      async getUserToken(): Promise<string> {
-        return "user-tok";
+      async getSession() {
+        return {
+          sessionToken: "session-tok",
+          userId: "user-id",
+          uuid: "shoprite-uuid",
+          mobile: "+27000000000",
+          customerId: "000C3V55",
+        };
       }
     },
   };

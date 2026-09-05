@@ -54,6 +54,43 @@ export function redactUrl(url: string): string {
   }
 }
 
+/** The `[REDACTED]` placeholder substituted for a sensitive trailing path segment. */
+export const REDACTED_SEGMENT = "[REDACTED]";
+
+/**
+ * Origin + pathname with the LAST non-empty path segment replaced by
+ * `[REDACTED]` and the query string dropped. For endpoints that carry a secret
+ * (e.g. the session token) as the final URL path segment, so the token never
+ * appears in any error message, path, or log line.
+ */
+export function redactPathTail(url: string): string {
+  const replaceTail = (pathname: string): string => {
+    const segments = pathname.split("/");
+    for (let i = segments.length - 1; i >= 0; i--) {
+      if (segments[i] !== "") {
+        segments[i] = REDACTED_SEGMENT;
+        break;
+      }
+    }
+    return segments.join("/");
+  };
+  try {
+    const u = new URL(url);
+    return `${u.origin}${replaceTail(u.pathname)}`;
+  } catch {
+    return replaceTail(url.split("?")[0]);
+  }
+}
+
+/** Pathname of a (possibly already-redacted) URL; best-effort for unparseable input. */
+function pathnameOf(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
+}
+
 export interface RequestOptions {
   headers?: Record<string, string>;
   /** JSON body — serialized with JSON.stringify and `application/json`. */
@@ -89,6 +126,20 @@ export interface RequestOptions {
   backoffCapMs?: number;
   /** Ceiling applied to a server-provided `Retry-After`. Defaults to 20s. */
   retryAfterCapMs?: number;
+  /**
+   * When true, the LAST path segment of the URL is treated as a secret (e.g. a
+   * session token embedded in the path). One redacted URL — last segment →
+   * `[REDACTED]`, query dropped — is used for every error surface (APIError
+   * message/path, timeout, abort, retry, wrapped errors) and the raw response
+   * body is OMITTED from any {@link APIError} so a server echo can't leak it.
+   */
+  sensitivePathTail?: boolean;
+  /**
+   * Redirect handling passed to `fetch`. Defaults to `"follow"`. `"manual"`
+   * rejects any redirect (as an {@link APIError}) so a credential-bearing URL is
+   * never propagated to a redirect target.
+   */
+  redirect?: "follow" | "manual";
 }
 
 /** Hard ceiling on attempts for a `retry:"safe"` call. */
@@ -190,7 +241,14 @@ export async function request<T = unknown>(
     backoffBaseMs = DEFAULT_BACKOFF_BASE_MS,
     backoffCapMs = DEFAULT_BACKOFF_CAP_MS,
     retryAfterCapMs = DEFAULT_RETRY_AFTER_CAP_MS,
+    sensitivePathTail = false,
+    redirect = "follow",
   } = options;
+
+  // ONE redacted URL, used for every error surface. When the trailing path
+  // segment is sensitive, it is masked; otherwise only the query is stripped.
+  const errorUrl = sensitivePathTail ? redactPathTail(url) : redactUrl(url);
+  const attemptOpts: AttemptOptions = { sensitive: sensitivePathTail, redirect, errorUrl };
 
   const finalHeaders: Record<string, string> = {
     accept: "application/json, text/plain, */*",
@@ -213,10 +271,10 @@ export async function request<T = unknown>(
 
   // `retry:"never"` — exactly one attempt; original behaviour preserved.
   if (retry !== "safe") {
-    return attemptRequest<T>(method, url, finalHeaders, body, timeoutMs, signal);
+    return attemptRequest<T>(method, url, finalHeaders, body, timeoutMs, signal, attemptOpts);
   }
 
-  const redacted = redactUrl(url);
+  const redacted = errorUrl;
   const deadline = Date.now() + retryBudgetMs;
   let lastErr: unknown;
 
@@ -228,7 +286,15 @@ export async function request<T = unknown>(
       // The per-attempt timeout is bounded by whatever overall budget remains, so
       // the budget also caps a single attempt (fetch + body read).
       const perAttempt = Math.min(timeoutMs, remaining);
-      return await attemptRequest<T>(method, url, finalHeaders, body, perAttempt, signal);
+      return await attemptRequest<T>(
+        method,
+        url,
+        finalHeaders,
+        body,
+        perAttempt,
+        signal,
+        attemptOpts
+      );
     } catch (err) {
       // An external abort is terminal: never retried, never relabeled as a timeout.
       if (isExternalAbort(err)) throw err;
@@ -260,13 +326,24 @@ export async function request<T = unknown>(
  * the per-attempt timeout, and {@link APIError} on a non-2xx response (carrying the
  * `Retry-After` header for the retry policy to honor).
  */
+/** Per-attempt options derived once in {@link request} and reused identically. */
+interface AttemptOptions {
+  /** Trailing path segment is a secret: mask errors, omit the APIError body. */
+  sensitive: boolean;
+  /** Redirect handling. `"manual"` rejects any redirect. */
+  redirect: "follow" | "manual";
+  /** Precomputed redacted URL used for every error surface. */
+  errorUrl: string;
+}
+
 async function attemptRequest<T>(
   method: string,
   url: string,
   finalHeaders: Record<string, string>,
   body: string | undefined,
   timeoutMs: number,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  opts: AttemptOptions
 ): Promise<ApiResponse<T>> {
   const controller = new AbortController();
   let timedOut = false;
@@ -291,8 +368,23 @@ async function attemptRequest<T>(
       headers: finalHeaders,
       body,
       signal: controller.signal,
-      redirect: "follow",
+      redirect: opts.redirect,
     });
+
+    // With `redirect:"manual"`, fetch surfaces a redirect as an opaque response
+    // (or a 3xx) instead of following it — reject so a credential-bearing URL is
+    // never propagated to the redirect target.
+    if (
+      opts.redirect === "manual" &&
+      (resp.type === "opaqueredirect" || (resp.status >= 300 && resp.status < 400))
+    ) {
+      throw new APIError(
+        resp.status || 502,
+        resp.statusText || "Redirect",
+        "",
+        pathnameOf(opts.errorUrl)
+      );
+    }
 
     const text = await resp.text();
     let data: unknown;
@@ -306,8 +398,10 @@ async function attemptRequest<T>(
       throw new APIError(
         resp.status,
         resp.statusText,
-        text,
-        new URL(url).pathname,
+        // Omit the raw body for sensitive-tail requests so a server echo of the
+        // URL/token can never leak through APIError.
+        opts.sensitive ? "" : text,
+        pathnameOf(opts.errorUrl),
         resp.headers.get("retry-after") ?? undefined
       );
     }
@@ -317,10 +411,10 @@ async function attemptRequest<T>(
     if (err instanceof Error && err.name === "AbortError") {
       // External abort takes precedence and is terminal — never relabel it as a timeout.
       if (signal?.aborted) {
-        throw new ExternalAbortError(method, redactUrl(url));
+        throw new ExternalAbortError(method, opts.errorUrl);
       }
       if (timedOut) {
-        throw new TimeoutError(timeoutMs, method, redactUrl(url));
+        throw new TimeoutError(timeoutMs, method, opts.errorUrl);
       }
     }
     throw err;

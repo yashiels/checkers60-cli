@@ -36,6 +36,8 @@ The file should contain the token fields written by the OTP login flow (`otp-tri
 
 > **Safety note:** `otp-trigger` sends a live SMS. Never call it automatically or in a loop — only trigger it explicitly when the user asks to log in.
 
+> **Session lifetime (important):** login yields a short-lived **~1 hour** session token. There is **no refresh** — when it expires, any command returns exit `3` (auth) and `checkers60 status` shows the session expired. Recovery is a fresh OTP login (steps above); the CLI never auto-refreshes and never auto-triggers an OTP. An expired session is a logged-out state.
+
 ## Headless / agent usage
 
 **Once logged in, everything is headless.** Shopping, cart, orders, slots — all read the saved tokens from the credentials file and need no interaction. Run them freely.
@@ -124,7 +126,7 @@ means Xtra-Savings members only.
 |---|---|
 | `checkers60 orders` | Show recent orders and their status |
 | `checkers60 profile` | Display the authenticated user's profile |
-| `checkers60 cards` | List saved payment cards |
+| `checkers60 cards` | Not available yet — the payment-cards contract is unverified and disabled |
 
 ## Typical flow
 

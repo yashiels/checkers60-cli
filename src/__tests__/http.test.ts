@@ -5,6 +5,7 @@ import {
   TimeoutError,
   ExternalAbortError,
   redactUrl,
+  redactPathTail,
   parseRetryAfter,
   MAX_ATTEMPTS,
 } from "../lib/http.js";
@@ -68,6 +69,7 @@ interface FetchInit {
   headers: Record<string, string>;
   body?: string;
   method?: string;
+  redirect?: string;
 }
 
 function makeFetchMock() {
@@ -141,6 +143,106 @@ describe("redactUrl", () => {
 
   it("keeps a bare origin+pathname unchanged", () => {
     expect(redactUrl("https://example.com/a/b")).toBe("https://example.com/a/b");
+  });
+});
+
+describe("redactPathTail", () => {
+  it("masks the last path segment and drops the query", () => {
+    expect(
+      redactPathTail("https://auth.example.com/customers/000C3V55/customer-profile/v2/SECRET-SESSION?x=1")
+    ).toBe("https://auth.example.com/customers/000C3V55/customer-profile/v2/[REDACTED]");
+  });
+
+  it("ignores a trailing slash and masks the real last segment", () => {
+    expect(redactPathTail("https://example.com/a/SECRET/")).toBe(
+      "https://example.com/a/[REDACTED]/"
+    );
+  });
+});
+
+describe("sensitivePathTail redaction", () => {
+  const sessionUrl =
+    "https://auth.example.com/customers/000C3V55/customer-profile/v2/SECRET-SESSION-TOKEN";
+
+  it("masks the trailing token in the APIError path/message and OMITS the body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => fakeResponse("SECRET-SESSION-TOKEN echoed in body", { status: 500 }))
+    );
+    const err = (await request("GET", sessionUrl, { sensitivePathTail: true }).catch(
+      (e) => e
+    )) as APIError;
+    expect(err).toBeInstanceOf(APIError);
+    expect(err.path).toBe("/customers/000C3V55/customer-profile/v2/[REDACTED]");
+    expect(err.message).not.toContain("SECRET-SESSION-TOKEN");
+    // Body is omitted for sensitive-tail requests.
+    expect(err.body).toBe("");
+    expect(err.message).not.toContain("echoed in body");
+  });
+
+  it("masks the trailing token in a timeout message", async () => {
+    vi.stubGlobal("fetch", abortAwareFetch());
+    const err = await request("GET", sessionUrl, {
+      sensitivePathTail: true,
+      timeoutMs: 20,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).toContain("[REDACTED]");
+    expect(err.message).not.toContain("SECRET-SESSION-TOKEN");
+  });
+
+  it("masks the trailing token in an external-abort message", async () => {
+    vi.stubGlobal("fetch", abortAwareFetch());
+    const ext = new AbortController();
+    const p = request("GET", sessionUrl, {
+      sensitivePathTail: true,
+      signal: ext.signal,
+      timeoutMs: 10_000,
+    });
+    ext.abort();
+    const err = await p.catch((e) => e);
+    expect(err).toBeInstanceOf(ExternalAbortError);
+    expect(err.message).toContain("[REDACTED]");
+    expect(err.message).not.toContain("SECRET-SESSION-TOKEN");
+  });
+});
+
+describe("redirect: manual", () => {
+  it("passes redirect:manual to fetch and rejects a 3xx redirect as an APIError", async () => {
+    const fetchMock = vi.fn(
+      (_url: string, _init: FetchInit): Promise<Response> =>
+        Promise.resolve(fakeResponse("", { status: 302, statusText: "Found" }))
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const err = await request("GET", "https://example.com/x", { redirect: "manual" }).catch(
+      (e) => e
+    );
+    expect(err).toBeInstanceOf(APIError);
+    expect((err as APIError).status).toBe(302);
+    expect(fetchMock.mock.calls[0][1].redirect).toBe("manual");
+  });
+
+  it("rejects an opaqueredirect response", async () => {
+    const opaque = {
+      type: "opaqueredirect",
+      ok: false,
+      status: 0,
+      statusText: "",
+      headers: new Headers(),
+      text: async () => "",
+    } as unknown as Response;
+    vi.stubGlobal("fetch", vi.fn(async () => opaque));
+    const err = await request("GET", "https://example.com/x", { redirect: "manual" }).catch(
+      (e) => e
+    );
+    expect(err).toBeInstanceOf(APIError);
+  });
+
+  it("defaults to redirect:follow when unset", async () => {
+    const fetchMock = makeFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    await request("GET", "https://example.com/x");
+    expect(fetchMock.mock.calls[0][1].redirect).toBe("follow");
   });
 });
 

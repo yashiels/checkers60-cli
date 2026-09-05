@@ -86,13 +86,13 @@ describe("initRuntime + getDeviceId", () => {
 
   it("a header builder used before initRuntime throws (fail-fast)", () => {
     const tm = new TokenManager();
-    expect(() => tm.shopriteHeaders("bff-token")).toThrow(/Runtime not initialized/);
+    expect(() => tm.bffHeaders("bff-token")).toThrow(/Runtime not initialized/);
   });
 
   it("after initRuntime, getDeviceId returns the resolved id and header builders use it", async () => {
     const id = await initRuntime();
     expect(getDeviceId()).toBe(id);
-    const headers = new TokenManager().shopriteHeaders("bff-token");
+    const headers = new TokenManager().bffHeaders("bff-token");
     expect(headers["device-id"]).toBe(id);
   });
 

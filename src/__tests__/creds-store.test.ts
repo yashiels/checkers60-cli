@@ -1,6 +1,4 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import {
   mkdtempSync,
   writeFileSync,
@@ -21,6 +19,7 @@ import {
   atomicWriteJson,
   withCredentialsLock,
   updateBffToken,
+  updateSession,
   readCredentials,
   CredentialsCorruptError,
   TransactionAbortedError,
@@ -214,12 +213,53 @@ describe("logout", () => {
   });
 });
 
-describe("TokenManager.getUserToken reconciliation", () => {
-  it("adopts a still-valid identical disk token with NO network refresh", async () => {
+describe("updateSession — one atomic commit that purges the DSL model", () => {
+  it("writes the whole session bundle AND nulls legacy DSL fields in one patch", async () => {
+    // Seed a file carrying the retired DSL token triple that must be purged.
     seed({
-      user_token: "valid-token",
-      refresh_token: "refresh-a",
+      device_id: "dev-1",
+      user_token: "old-user",
+      refresh_token: "old-refresh",
       user_expiry: Date.now() + 3_600_000,
+    });
+    const expiry = Date.now() + 3_600_000;
+    const committed = await updateSession({
+      sessionToken: "sess-1",
+      sessionExpiry: expiry,
+      userId: "user-id",
+      customerId: "000C3V55",
+      shopriteUuid: "uuid-1",
+      mobile: "+27000",
+    });
+
+    // Both the returned state and the on-disk file reflect one atomic commit.
+    for (const state of [committed, readDisk()]) {
+      expect(state.session_token).toBe("sess-1");
+      expect(state.session_expiry).toBe(expiry);
+      expect(state.sixty60_user_id).toBe("user-id");
+      expect(state.customer_uid).toBe("000C3V55");
+      expect(state.shoprite_uuid).toBe("uuid-1");
+      expect(state.mobile).toBe("+27000");
+      // Legacy DSL fields purged.
+      expect(state.user_token ?? null).toBeNull();
+      expect(state.refresh_token ?? null).toBeNull();
+      expect(state.user_expiry).toBeUndefined();
+      // device_id preserved.
+      expect(state.device_id).toBe("dev-1");
+    }
+    expect(mode(credsPath)).toBe(0o600);
+  });
+});
+
+describe("TokenManager.getSession — disk-authoritative", () => {
+  it("returns the committed session snapshot from a single disk read", async () => {
+    seed({
+      session_token: "sess-1",
+      session_expiry: Date.now() + 3_600_000,
+      sixty60_user_id: "user-id",
+      shoprite_uuid: "uuid-1",
+      customer_uid: "000C3V55",
+      mobile: "+27000",
     });
     const fetchMock = vi.fn(() => {
       throw new Error("network must not be called");
@@ -227,135 +267,56 @@ describe("TokenManager.getUserToken reconciliation", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const tm = new TokenManager();
-    await expect(tm.getUserToken()).resolves.toBe("valid-token");
+    const session = await tm.getSession();
+    expect(session).toEqual({
+      sessionToken: "sess-1",
+      userId: "user-id",
+      uuid: "uuid-1",
+      mobile: "+27000",
+      customerId: "000C3V55",
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("throws logged-out when disk has no refresh token (never resurrects memory)", async () => {
-    seed({ user_token: "stale", user_expiry: 0 });
-    const tm = new TokenManager();
-    // Simulate a stale in-memory refresh token that must NOT be resurrected.
-    tm.refreshToken = "ghost-refresh";
-    await expect(tm.getUserToken()).rejects.toThrow(/Not logged in/);
+  it("throws not-logged-in when disk has no session token (never resurrects memory)", async () => {
+    seed({
+      session_token: "sess-1",
+      session_expiry: Date.now() + 3_600_000,
+    });
+    const tm = new TokenManager(); // adopts a live in-memory session
+    // Another process logged out: disk now has no session.
+    seed({ device_id: "dev-1" });
+    await expect(tm.getSession()).rejects.toThrow(/Not logged in/);
   });
 
-  it("keeps the old refresh token when the refresh response omits a new one", async () => {
+  it("throws not-logged-in on an expired session (60s skew), no refresh", async () => {
     seed({
-      user_token: "expired",
-      refresh_token: "refresh-old",
-      user_expiry: 0,
+      session_token: "sess-1",
+      // Inside the 60s skew window → treated as expired.
+      session_expiry: Date.now() + 30_000,
+      sixty60_user_id: "user-id",
+      shoprite_uuid: "uuid-1",
     });
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/token/dsl")) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ access_token: "bff", expires_in: 86_400 }), {
-            status: 200,
-          })
-        );
-      }
-      // Refresh response WITHOUT a refreshToken.
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({ response: { accessToken: "user-new", expiresIn: 3600 } }),
-          { status: 200 }
-        )
-      );
+    const fetchMock = vi.fn(() => {
+      throw new Error("network must not be called (no refresh)");
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-
     const tm = new TokenManager();
-    await expect(tm.getUserToken()).resolves.toBe("user-new");
-    const disk = readDisk();
-    expect(disk.refresh_token).toBe("refresh-old");
-    expect(disk.user_token).toBe("user-new");
+    await expect(tm.getSession()).rejects.toThrow(/Not logged in/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("nested getUserToken -> getBFFTokenLocked does not deadlock", async () => {
+  it("isAuthenticated keys on a valid session token ONLY (legacy DSL never counts)", async () => {
+    // Only legacy DSL fields present → NOT authenticated.
     seed({
-      user_token: "expired",
-      refresh_token: "refresh-old",
-      user_expiry: 0,
-      // No bff token → forces the in-lock getBFFTokenLocked network path.
+      user_token: "old",
+      refresh_token: "old-refresh",
+      user_expiry: Date.now() + 3_600_000,
     });
-    let bffCalls = 0;
-    globalThis.fetch = ((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/token/dsl")) {
-        bffCalls += 1;
-        return Promise.resolve(
-          new Response(JSON.stringify({ access_token: "bff", expires_in: 86_400 }), {
-            status: 200,
-          })
-        );
-      }
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            response: { accessToken: "user-new", refreshToken: "refresh-new", expiresIn: 3600 },
-          }),
-          { status: 200 }
-        )
-      );
-    }) as unknown as typeof fetch;
+    expect(new TokenManager().isAuthenticated()).toBe(false);
 
-    const tm = new TokenManager();
-    // If the nested lock deadlocked this would hang; the test timeout guards it.
-    const token = await tm.getUserToken();
-    expect(token).toBe("user-new");
-    expect(bffCalls).toBe(1);
-    expect(readDisk().bff_token).toBe("bff");
-  }, 5000);
-});
-
-describe("cross-process locking (real child processes)", () => {
-  it("two concurrent refreshers => exactly ONE network refresh, both converge", async () => {
-    seed({
-      user_token: "expired",
-      refresh_token: "refresh-old",
-      user_expiry: 0,
-    });
-    const counterPath = join(tempDir, "refresh-count");
-    writeFileSync(counterPath, "");
-    const workerPath = fileURLToPath(new URL("./refresh-worker.ts", import.meta.url));
-    const barrier = Date.now() + 400;
-
-    const run = (): Promise<{ code: number; out: string; err: string }> =>
-      new Promise((resolve) => {
-        const child = spawn(process.execPath, ["--import", "tsx", workerPath], {
-          env: {
-            ...process.env,
-            CHECKERS60_CREDS_PATH: credsPath,
-            CHECKERS60_DEVICE_ID: "test-device-id",
-            WORKER_COUNTER: counterPath,
-            BARRIER_TS: String(barrier),
-          },
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        let out = "";
-        let err = "";
-        child.stdout.on("data", (d) => (out += d));
-        child.stderr.on("data", (d) => (err += d));
-        child.on("close", (code) => resolve({ code: code ?? 0, out, err }));
-      });
-
-    const [a, b] = await Promise.all([run(), run()]);
-
-    expect(a.code, `worker A failed: ${a.err}`).toBe(0);
-    expect(b.code, `worker B failed: ${b.err}`).toBe(0);
-
-    const refreshCount = readFileSync(counterPath, "utf8").length;
-    expect(refreshCount).toBe(1);
-
-    const disk = readDisk();
-    expect(disk.user_token).toBe("user-new");
-    expect(disk.refresh_token).toBe("refresh-new");
-
-    const resA = JSON.parse(a.out.trim());
-    const resB = JSON.parse(b.out.trim());
-    expect(resA.token).toBe("user-new");
-    expect(resB.token).toBe("user-new");
-    expect(resA.refreshToken).toBe("refresh-new");
-    expect(resB.refreshToken).toBe("refresh-new");
-  }, 20_000);
+    // A valid session token → authenticated.
+    seed({ session_token: "sess-1", session_expiry: Date.now() + 3_600_000 });
+    expect(new TokenManager().isAuthenticated()).toBe(true);
+  });
 });

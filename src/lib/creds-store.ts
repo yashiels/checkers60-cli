@@ -19,6 +19,16 @@ import { CONFIG } from "./config.js";
 export interface CredentialsFile {
   bff_token?: string | null;
   bff_expiry?: number;
+  // ── sixty60 session model (current) ──────────────────────────────────────
+  /** Short-lived (1h) sixty60 session token: bearer for orders/catalog/returns. */
+  session_token?: string | null;
+  /** Absolute ms epoch when the session token expires. */
+  session_expiry?: number;
+  /** DSL customerId (e.g. `000C3V55`) — from BFF /users/verify. */
+  customer_uid?: string;
+  /** Shoprite customer UUID (the `customer-id` header value). */
+  shoprite_uuid?: string;
+  // ── legacy Shoprite-DSL token model (retired; nulled on login) ────────────
   user_token?: string | null;
   refresh_token?: string | null;
   user_expiry?: number;
@@ -321,60 +331,44 @@ export function updateBffToken(fields: BffFields): Promise<CredentialsFile> {
   return withCredentialsLock((ctx) => updateBffTokenLocked(ctx, fields));
 }
 
-export interface UserTokenFields {
-  userToken: string | null;
-  refreshToken: string | null;
-  userExpiry: number;
+/**
+ * The full sixty60 session bundle, committed as ONE atomic unit. Writing it
+ * also NULLS the retired Shoprite-DSL token triple (`user_token`,
+ * `refresh_token`, `user_expiry`) in the same patch, so a valid login can never
+ * leave stale DSL tokens on disk.
+ */
+export interface SessionFields {
+  sessionToken: string;
+  sessionExpiry: number;
+  /** sixty60 internal userId (Mongo id). */
+  userId: string;
+  /** DSL customerId (e.g. `000C3V55`). */
+  customerId: string;
+  /** Shoprite customer UUID. */
+  shopriteUuid: string;
+  mobile: string;
 }
 
-export function updateUserTokensLocked(
+export function updateSessionLocked(
   ctx: LockedContext,
-  fields: UserTokenFields
+  fields: SessionFields
 ): Promise<CredentialsFile> {
   return ctx.writePatch({
-    user_token: fields.userToken,
-    refresh_token: fields.refreshToken,
-    user_expiry: fields.userExpiry,
+    session_token: fields.sessionToken,
+    session_expiry: fields.sessionExpiry,
+    sixty60_user_id: fields.userId,
+    customer_uid: fields.customerId,
+    shoprite_uuid: fields.shopriteUuid,
+    mobile: fields.mobile,
+    // Purge the retired DSL token model atomically with the session commit.
+    user_token: null,
+    refresh_token: null,
+    user_expiry: undefined,
   });
 }
 
-export function updateUserTokens(fields: UserTokenFields): Promise<CredentialsFile> {
-  return withCredentialsLock((ctx) => updateUserTokensLocked(ctx, fields));
-}
-
-/** OTP verification result: same token triple, persisted as one atomic unit. */
-export function updateOtpResultLocked(
-  ctx: LockedContext,
-  fields: UserTokenFields
-): Promise<CredentialsFile> {
-  return updateUserTokensLocked(ctx, fields);
-}
-
-export function updateOtpResult(fields: UserTokenFields): Promise<CredentialsFile> {
-  return withCredentialsLock((ctx) => updateOtpResultLocked(ctx, fields));
-}
-
-export interface IdentityFields {
-  mobile?: string;
-  customer_id?: string;
-  sixty60_user_id?: string;
-  profile_token?: string;
-}
-
-export function updateIdentityLocked(
-  ctx: LockedContext,
-  fields: IdentityFields
-): Promise<CredentialsFile> {
-  const patch: Partial<CredentialsFile> = {};
-  if (fields.mobile) patch.mobile = fields.mobile;
-  if (fields.customer_id) patch.customer_id = fields.customer_id;
-  if (fields.sixty60_user_id) patch.sixty60_user_id = fields.sixty60_user_id;
-  if (fields.profile_token) patch.profile_token = fields.profile_token;
-  return ctx.writePatch(patch);
-}
-
-export function updateIdentity(fields: IdentityFields): Promise<CredentialsFile> {
-  return withCredentialsLock((ctx) => updateIdentityLocked(ctx, fields));
+export function updateSession(fields: SessionFields): Promise<CredentialsFile> {
+  return withCredentialsLock((ctx) => updateSessionLocked(ctx, fields));
 }
 
 export function updateDeviceIdLocked(

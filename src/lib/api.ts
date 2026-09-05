@@ -5,7 +5,7 @@ import {
   storeIdJsonArray,
   type StoreContext,
 } from "./config.js";
-import { TokenManager } from "./credentials.js";
+import { TokenManager, type SessionContext } from "./credentials.js";
 import { getDeviceId } from "./runtime.js";
 import { request, APIError } from "./http.js";
 import {
@@ -247,8 +247,9 @@ interface CartsResponse {
 
 /**
  * Checkers Sixty60 mobile-app API client. Auth is handled by an internal
- * TokenManager; every call lazily resolves a valid user token (refreshing
- * silently, never triggering OTP).
+ * TokenManager; every call resolves the committed session snapshot from disk
+ * (fail-fast when logged out or expired — there is no refresh, and OTP is never
+ * triggered automatically).
  */
 export class CheckersAPI {
   readonly tokens: TokenManager;
@@ -258,44 +259,48 @@ export class CheckersAPI {
   }
 
   /**
-   * Headers required by the sixty60 microservices (orders-api, auth,
-   * payments, catalog). All MITM-verified against app v2.0.114.
+   * Headers required by the sixty60 microservices (orders-api, catalog,
+   * returns, payments). Identity comes ENTIRELY from the {@link SessionContext}
+   * snapshot — never from the mutable CONFIG singleton. `mobilenumber`/`email`/
+   * `x-api-key` are intentionally absent: they are not sent to these endpoints.
    */
   private sixty60Headers(
-    userToken: string,
+    session: SessionContext,
     stores?: StoreContext[]
   ): Record<string, string> {
     return {
-      authorization: `Bearer ${userToken}`,
+      authorization: `Bearer ${session.sessionToken}`,
       channel: CONFIG.CHANNEL,
       "channel-os": CONFIG.APP_VERSION,
       "app-version": CONFIG.APP_VERSION,
       appversion: CONFIG.APP_VERSION_CODE,
       "istio-appversion": CONFIG.APP_VERSION_CODE,
       "device-id": getDeviceId(),
-      "customer-id": CONFIG.SHOPRITE_UUID,
-      userid: CONFIG.SIXTY60_USER_ID,
-      mobilenumber: CONFIG.MOBILE,
-      email: CONFIG.EMAIL,
+      "customer-id": session.uuid,
+      userid: session.userId,
       "aws-cf-cd-storeid": storeIdList(stores), // comma-separated
       storeids: storeIdJsonArray(stores), // JSON array
       "istio-storeids": storeIdJsonArray(stores), // JSON array
     };
   }
 
-  private async headers(stores?: StoreContext[]): Promise<Record<string, string>> {
-    const user = await this.tokens.getUserToken();
-    return this.sixty60Headers(user, stores);
-  }
-
-  /** Throws a helpful error when the sixty60 user ID is required but unset. */
-  private requireUserId(): string {
-    if (!CONFIG.SIXTY60_USER_ID) {
+  /**
+   * Resolve the committed session snapshot and fail fast (before any orders-api
+   * call) if the session token or its bound identity (userId/uuid) is missing.
+   */
+  private async session(): Promise<SessionContext> {
+    const session = await this.tokens.getSession();
+    if (!session.sessionToken || !session.userId || !session.uuid) {
       throw new Error(
-        "Missing sixty60 user ID. Set CHECKERS60_USER_ID, or log in again to populate it."
+        "Missing session identity. Log in again to populate it (checkers60 login)."
       );
     }
-    return CONFIG.SIXTY60_USER_ID;
+    return session;
+  }
+
+  private async headers(stores?: StoreContext[]): Promise<Record<string, string>> {
+    const session = await this.session();
+    return this.sixty60Headers(session, stores);
   }
 
   // ── Product search (catalog.sixty60.co.za) ──────────────────────────────
@@ -314,7 +319,8 @@ export class CheckersAPI {
     } = {}
   ): Promise<CatalogResponse> {
     const { page = 0, pageSize = 20, stores, dealsOnly = false } = opts;
-    const headers = await this.headers(stores);
+    const session = await this.session();
+    const headers = this.sixty60Headers(session, stores);
 
     const body = {
       filter: {
@@ -333,7 +339,7 @@ export class CheckersAPI {
       },
       userContext: {
         storeContexts: stores ?? CONFIG.DEFAULT_STORES,
-        userId: CONFIG.SIXTY60_USER_ID,
+        userId: session.userId,
         location: CONFIG.USER_LOCATION,
       },
     };
@@ -545,26 +551,48 @@ export class CheckersAPI {
 
   // ── Addresses & cards (auth.sixty60.co.za) ──────────────────────────────
 
+  /**
+   * Delivery addresses come from the customer profile. The dedicated
+   * `/customers/{id}/addresses` contract was never captured, so this RE-FETCHES
+   * `customer-profile/v2` (Bearer static PROFILE_TOKEN, session token in the
+   * path → sensitivePathTail + redirect:manual) and returns its `addresses`.
+   * The profile response is not persisted, so each call re-fetches.
+   */
   async getAddresses(): Promise<Address[]> {
-    const userId = this.requireUserId();
-    const headers = await this.headers();
-    const res = await request<{ items?: Address[] }>(
+    const session = await this.session();
+    const res = await request<{ userProfile?: { addresses?: Address[] } }>(
       "GET",
-      `${CONFIG.AUTH_API}/customers/${userId}/addresses`,
-      { headers, retry: "safe" }
+      `${CONFIG.AUTH_BASE}/customers/${encodeURIComponent(session.customerId)}/customer-profile/v2/${session.sessionToken}`,
+      {
+        headers: this.profileHeaders(),
+        sensitivePathTail: true,
+        redirect: "manual",
+        retry: "safe",
+      }
     );
-    return res.data?.items ?? [];
+    return res.data?.userProfile?.addresses ?? [];
   }
 
+  /**
+   * DEFERRED — the payment-cards contract (token, headers, host) was NOT
+   * exercised in the capture, so no guessed request ships. Re-enable once the
+   * real contract is observed.
+   */
   async getPaymentCards(): Promise<Card[]> {
-    const userId = this.requireUserId();
-    const headers = await this.headers();
-    const res = await request<{ cards?: Card[] }>(
-      "GET",
-      `${CONFIG.AUTH_API}/customers/${userId}/cards`,
-      { headers, retry: "safe" }
+    throw new Error(
+      "Payment cards are not available in this version (endpoint contract unverified)."
     );
-    return res.data?.cards ?? [];
+  }
+
+  /** Customer-profile header set: Bearer static PROFILE_TOKEN + base app headers. */
+  private profileHeaders(): Record<string, string> {
+    return {
+      authorization: `Bearer ${CONFIG.PROFILE_TOKEN}`,
+      channel: CONFIG.CHANNEL,
+      "app-version": CONFIG.APP_VERSION,
+      appversion: CONFIG.APP_VERSION_CODE,
+      "device-id": getDeviceId(),
+    };
   }
 
   // ── Orders (orders-api.sixty60.co.za) ───────────────────────────────────
@@ -651,20 +679,18 @@ export class CheckersAPI {
   // ── User profile (Shoprite DSL) ─────────────────────────────────────────
 
   async getUserProfile(): Promise<UserProfile | undefined> {
-    const user = await this.tokens.getUserToken();
+    const session = await this.session();
     const res = await request<{ response?: { user?: UserProfile } }>(
       "GET",
       `${CONFIG.SHOPRITE_BASE}/users`,
       {
         headers: {
           "x-api-key": CONFIG.X_API_KEY_USER,
-          access_token: user,
+          access_token: session.sessionToken,
           channel: CONFIG.CHANNEL,
-          "channel-os": CONFIG.APP_VERSION,
           "app-version": CONFIG.APP_VERSION,
           appversion: CONFIG.APP_VERSION_CODE,
           "device-id": getDeviceId(),
-          "customer-id": CONFIG.SHOPRITE_UUID,
         },
         retry: "safe",
       }

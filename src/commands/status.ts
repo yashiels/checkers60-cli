@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { TokenManager } from "../lib/credentials.js";
+import { TokenManager, loadCredentials } from "../lib/credentials.js";
 import { CheckersAPI } from "../lib/api.js";
 import { CONFIG } from "../lib/config.js";
 import { formatRand } from "../lib/format.js";
@@ -20,7 +20,8 @@ export async function status(options: StatusOptions = {}): Promise<void> {
 
   const tokens = new TokenManager();
   const loggedIn = tokens.isAuthenticated();
-  const userExpiry = tokens.userExpiry || null;
+  const creds = loadCredentials();
+  const sessionExpiry = tokens.sessionExpiry || null;
   const bffExpiry = tokens.bffExpiry || null;
 
   // Best-effort cart summary — only attempt when authenticated.
@@ -42,11 +43,12 @@ export async function status(options: StatusOptions = {}): Promise<void> {
 
   const data = {
     loggedIn,
-    mobile: CONFIG.MOBILE || null,
-    sixty60UserId: CONFIG.SIXTY60_USER_ID || null,
-    shopriteUuid: CONFIG.SHOPRITE_UUID || null,
+    mobile: creds.mobile || CONFIG.MOBILE || null,
+    sixty60UserId: creds.sixty60_user_id || null,
+    shopriteUuid: creds.shoprite_uuid || null,
+    customerUid: creds.customer_uid || null,
     storeCount: CONFIG.DEFAULT_STORES.length,
-    userTokenExpiry: userExpiry ? new Date(userExpiry).toISOString() : null,
+    sessionExpiry: sessionExpiry ? new Date(sessionExpiry).toISOString() : null,
     bffTokenExpiry: bffExpiry ? new Date(bffExpiry).toISOString() : null,
     cart: cart ?? null,
     cartError,
@@ -65,12 +67,13 @@ export async function status(options: StatusOptions = {}): Promise<void> {
   }
 
   process.stdout.write(`${chalk.green("✅ Logged in")}\n`);
-  if (CONFIG.MOBILE) process.stdout.write(`${chalk.dim(`   Mobile: ${CONFIG.MOBILE}`)}\n`);
-  if (CONFIG.SIXTY60_USER_ID) {
-    process.stdout.write(`${chalk.dim(`   User ID: ${CONFIG.SIXTY60_USER_ID}`)}\n`);
+  const mobile = creds.mobile || CONFIG.MOBILE;
+  if (mobile) process.stdout.write(`${chalk.dim(`   Mobile: ${mobile}`)}\n`);
+  if (creds.sixty60_user_id) {
+    process.stdout.write(`${chalk.dim(`   User ID: ${creds.sixty60_user_id}`)}\n`);
   }
   process.stdout.write(`${chalk.dim(`   Stores: ${CONFIG.DEFAULT_STORES.length} configured`)}\n`);
-  process.stdout.write(`${chalk.dim(`   Token expiry: ${formatExpiry(userExpiry)}`)}\n`);
+  process.stdout.write(`${chalk.dim(`   Session expiry: ${formatExpiry(sessionExpiry)}`)}\n`);
 
   if (cart) {
     process.stdout.write(
@@ -85,7 +88,7 @@ export async function status(options: StatusOptions = {}): Promise<void> {
 function formatExpiry(expiry: number | null): string {
   if (!expiry) return "unknown";
   const now = Date.now();
-  if (expiry <= now) return "expired (will refresh)";
+  if (expiry <= now) return "expired (log in again)";
   const mins = Math.round((expiry - now) / 60_000);
   if (mins < 60) return `${mins}m`;
   return `${Math.round(mins / 60)}h`;

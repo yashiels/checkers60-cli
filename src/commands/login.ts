@@ -50,19 +50,14 @@ export async function otpVerify(
 
   if (json) {
     process.stdout.write(
-      `${JSON.stringify({ loggedIn: true, expiresAt: new Date(tokens.userExpiry).toISOString() }, null, 2)}\n`
+      `${JSON.stringify({ loggedIn: true, expiresAt: new Date(tokens.sessionExpiry).toISOString() }, null, 2)}\n`
     );
     return;
   }
 
   process.stdout.write(`\n${chalk.green("✅ Logged in!")}\n`);
   process.stdout.write(
-    `${chalk.dim(`   Token valid until ${new Date(tokens.userExpiry).toLocaleString()}`)}\n`
+    `${chalk.dim(`   Session valid until ${new Date(tokens.sessionExpiry).toLocaleString()}`)}\n`
   );
-  if (!CONFIG.SIXTY60_USER_ID) {
-    process.stdout.write(
-      `${chalk.yellow("   Tip: set CHECKERS60_USER_ID to enable addresses, cards and orders.")}\n`
-    );
-  }
   process.stdout.write(`\n${chalk.dim('   Try: checkers60 search "milk"')}\n\n`);
 }
