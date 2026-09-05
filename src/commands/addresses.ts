@@ -1,17 +1,20 @@
 import chalk from "chalk";
-import { CheckersAPI } from "../lib/api.js";
+import { getAddresses } from "../lib/orders.js";
 import { startSpinner } from "../lib/output.js";
 
 export interface AddressesOptions {
   json?: boolean;
 }
 
+/**
+ * List saved delivery addresses. Only id + label + city are emitted — never the
+ * unit number, delivery notes, coordinates, street, suburb, or full address.
+ */
 export async function addresses(options: AddressesOptions = {}): Promise<void> {
   const { json = false } = options;
   const spinner = json ? null : startSpinner("Fetching addresses…");
 
-  const api = new CheckersAPI();
-  const items = await api.getAddresses();
+  const items = await getAddresses();
   spinner?.stop();
 
   if (json) {
@@ -26,11 +29,9 @@ export async function addresses(options: AddressesOptions = {}): Promise<void> {
 
   process.stdout.write(`\n${chalk.bold("Delivery addresses")}\n\n`);
   for (const a of items) {
-    const id = a._id ?? a.identifier ?? "—";
-    const name = a.name ?? "(unnamed)";
-    process.stdout.write(`  ${chalk.cyan("●")} ${chalk.bold(name)}\n`);
-    if (a.fullAddress) process.stdout.write(`    ${chalk.dim(a.fullAddress)}\n`);
-    process.stdout.write(`    ${chalk.dim(`id: ${id}`)}\n`);
+    process.stdout.write(`  ${chalk.cyan("●")} ${chalk.bold(a.name || "(unnamed)")}\n`);
+    if (a.city) process.stdout.write(`    ${chalk.dim(a.city)}\n`);
+    process.stdout.write(`    ${chalk.dim(`id: ${a.id || "—"}`)}\n`);
   }
   process.stdout.write("\n");
 }

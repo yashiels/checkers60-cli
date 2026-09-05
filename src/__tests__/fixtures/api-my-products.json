@@ -1,0 +1,45 @@
+{
+  "success": true,
+  "userProductScores": [
+    {
+      "productId": "PROD-0001",
+      "count": 19,
+      "score": 9.3
+    },
+    {
+      "productId": "PROD-0002",
+      "count": 18,
+      "score": 8.6
+    },
+    {
+      "productId": "PROD-0003",
+      "count": 17,
+      "score": 7.9
+    },
+    {
+      "productId": "PROD-0004",
+      "count": 16,
+      "score": 7.2
+    },
+    {
+      "productId": "PROD-0005",
+      "count": 15,
+      "score": 6.5
+    },
+    {
+      "productId": "PROD-0006",
+      "count": 14,
+      "score": 5.8
+    },
+    {
+      "productId": "PROD-0007",
+      "count": 13,
+      "score": 5.1
+    },
+    {
+      "productId": "PROD-0008",
+      "count": 12,
+      "score": 4.4
+    }
+  ]
+}

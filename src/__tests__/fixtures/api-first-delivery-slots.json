@@ -1,1 +1,15 @@
-{"allowASAPDelivery":true,"firstAvailableSlotSixtyMin":{"startTime":"2026-09-05T11:00:00+02:00","endTime":"2026-09-05T12:00:00+02:00"},"deliveryFeesAndMinimumOrderValues":{"sixty-min-delivery":{"serviceOption":"sixty-min-delivery","deliveryFee":37,"minimumOrderValue":150}},"success":true}
+{
+  "allowASAPDelivery": true,
+  "firstAvailableSlotSixtyMin": {
+    "startTime": "2026-09-05T11:00:00+02:00",
+    "endTime": "2026-09-05T12:00:00+02:00"
+  },
+  "deliveryFeesAndMinimumOrderValues": {
+    "sixty-min-delivery": {
+      "serviceOption": "sixty-min-delivery",
+      "deliveryFee": 37,
+      "minimumOrderValue": 150
+    }
+  },
+  "success": true
+}

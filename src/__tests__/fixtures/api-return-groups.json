@@ -1,1 +1,8 @@
-{"hasNextPage":false,"returns":{"completedReturnGroups":[],"inProgressReturnGroups":[]},"success":true}
+{
+  "hasNextPage": false,
+  "success": true,
+  "returns": {
+    "completedReturnGroups": [],
+    "inProgressReturnGroups": []
+  }
+}

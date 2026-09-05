@@ -1,7 +1,7 @@
 import chalk from "chalk";
 import Table from "cli-table3";
-import { CheckersAPI, type OrderGroup } from "../lib/api.js";
 import { formatRand } from "../lib/format.js";
+import { getOrderDetail, getOrderSummaries } from "../lib/orders.js";
 import { startSpinner } from "../lib/output.js";
 
 export interface OrdersOptions {
@@ -13,16 +13,15 @@ export async function orders(options: OrdersOptions = {}): Promise<void> {
   const { all = false, json = false } = options;
   const spinner = json ? null : startSpinner("Fetching orders…");
 
-  const api = new CheckersAPI();
-  const groups = await api.getOrders(!all);
+  const summaries = await getOrderSummaries(all);
   spinner?.stop();
 
   if (json) {
-    process.stdout.write(`${JSON.stringify(groups, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(summaries, null, 2)}\n`);
     return;
   }
 
-  if (groups.length === 0) {
+  if (summaries.length === 0) {
     process.stdout.write(
       `${chalk.yellow(all ? "No orders found." : "No active orders. Try --all for history.")}\n`
     );
@@ -34,16 +33,57 @@ export async function orders(options: OrdersOptions = {}): Promise<void> {
     colWidths: [22, 24, 14],
     style: { head: [], border: [] },
   });
+  for (const s of summaries) {
+    table.push([
+      s.reference || "—",
+      formatStatus(s.status ?? "unknown"),
+      s.total !== null ? formatRand(s.total) : chalk.dim("—"),
+    ]);
+  }
+  process.stdout.write(`\n${table.toString()}\n\n`);
+}
 
-  for (const group of groups) {
-    const order = group.orders?.[0];
-    const ref = group.reference ?? "—";
-    const status = order?.status?.orderStatus ?? "unknown";
-    const total = order?.total?.totalOwing;
-    table.push([ref, formatStatus(status), total !== undefined ? formatRand(total) : chalk.dim("—")]);
+/** `orders show <ref>` — IDOR-guarded: the ref must be in the account's list. */
+export async function ordersShow(ref: string, options: OrdersOptions = {}): Promise<void> {
+  const { json = false } = options;
+  const spinner = json ? null : startSpinner("Fetching order…");
+
+  const detail = await getOrderDetail(ref);
+  spinner?.stop();
+
+  if (!detail) {
+    throw new Error(`Order ${ref} not found in your account.`);
   }
 
-  process.stdout.write(`\n${table.toString()}\n\n`);
+  if (json) {
+    process.stdout.write(`${JSON.stringify(detail, null, 2)}\n`);
+    return;
+  }
+
+  process.stdout.write(`\n${chalk.bold(`Order ${detail.reference}`)}\n`);
+  process.stdout.write(`  Status: ${formatStatus(detail.status ?? "unknown")}\n`);
+  process.stdout.write(
+    `  Total:  ${detail.total !== null ? formatRand(detail.total) : chalk.dim("—")}\n\n`
+  );
+
+  if (detail.items.length === 0) {
+    process.stdout.write(`${chalk.dim("  No line items.")}\n\n`);
+    return;
+  }
+
+  const table = new Table({
+    head: [chalk.bold("Qty"), chalk.bold("Product"), chalk.bold("Price")],
+    colWidths: [6, 46, 14],
+    style: { head: [], border: [] },
+  });
+  for (const item of detail.items) {
+    table.push([
+      String(item.quantity),
+      item.name || chalk.dim(item.productId),
+      item.price !== null ? formatRand(item.price) : chalk.dim("—"),
+    ]);
+  }
+  process.stdout.write(`${table.toString()}\n\n`);
 }
 
 function formatStatus(status: string): string {
@@ -52,5 +92,3 @@ function formatStatus(status: string): string {
   if (/deliver|complete|fulfil/.test(s)) return chalk.green(status);
   return chalk.yellow(status);
 }
-
-export type { OrderGroup };

@@ -94,6 +94,7 @@ export const CONFIG = {
   BFF_BASE: "https://dc-app-backend-for-frontend.sixty60.co.za/api/v1",
   AUTH_BASE: "https://auth.sixty60.co.za",
   ORDERS_API: "https://orders-api.sixty60.co.za",
+  RETURNS_API: "https://returns-api.sixty60.co.za",
   AUTH_API: "https://auth.sixty60.co.za",
   PAYMENTS_API: "https://payments.sixty60.co.za",
   CATALOG_API: "https://catalog.sixty60.co.za",

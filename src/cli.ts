@@ -344,7 +344,7 @@ program
   );
 
 // ── orders ─────────────────────────────────────────────────────────────
-program
+const ordersCmd = program
   .command("orders")
   .description("Show your orders (active by default)")
   .option("--all", "Include past orders", false)
@@ -355,12 +355,112 @@ program
 Examples:
   $ checkers60 orders
   $ checkers60 orders --all
+  $ checkers60 orders show <reference>
 `
   )
   .action(
     wrap(async (opts: { all?: boolean; json?: boolean }) => {
       const { orders } = await import("./commands/orders.js");
       await orders({ all: opts.all, json: mergeJson(opts) });
+    })
+  );
+
+ordersCmd
+  .command("show <reference>")
+  .description("Show one of your orders by reference (own orders only)")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (reference: string, opts: { json?: boolean }) => {
+      const { ordersShow } = await import("./commands/orders.js");
+      await ordersShow(reference, { json: mergeJson(opts) });
+    })
+  );
+
+// ── track ──────────────────────────────────────────────────────────────
+program
+  .command("track <reference>")
+  .description("Show status for one of your orders (own orders only)")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (reference: string, opts: { json?: boolean }) => {
+      const { track } = await import("./commands/track.js");
+      await track(reference, { json: mergeJson(opts) });
+    })
+  );
+
+// ── regulars ───────────────────────────────────────────────────────────
+program
+  .command("regulars")
+  .description("Show the products you buy most often")
+  .option("-n, --top <n>", "How many to show", "20")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (opts: { top?: string; json?: boolean }) => {
+      const { regulars } = await import("./commands/regulars.js");
+      await regulars({ top: opts.top ? parseInt(opts.top, 10) : 20, json: mergeJson(opts) });
+    })
+  );
+
+// ── reorder (preview only) ──────────────────────────────────────────────
+program
+  .command("reorder <reference>")
+  .description("Preview a past order's items (--preview required; nothing is added to the cart)")
+  .option("--preview", "Preview only — required in this version", false)
+  .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 reorder <order-id> --preview
+`
+  )
+  .action(
+    wrap(async (reference: string, opts: { preview?: boolean; json?: boolean }) => {
+      const { reorder } = await import("./commands/reorder.js");
+      await reorder(reference, { preview: opts.preview, json: mergeJson(opts) });
+    })
+  );
+
+// ── fav ────────────────────────────────────────────────────────────────
+program
+  .command("fav")
+  .description("List your favourite products")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { fav } = await import("./commands/fav.js");
+      await fav({ json: mergeJson(opts) });
+    })
+  );
+
+// ── returns ────────────────────────────────────────────────────────────
+const returnsCmd = program
+  .command("returns")
+  .description("List your returns")
+  .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 returns
+  $ checkers60 returns show <id>
+`
+  )
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { returns } = await import("./commands/returns.js");
+      await returns({ json: mergeJson(opts) });
+    })
+  );
+
+returnsCmd
+  .command("show <id>")
+  .description("Show one of your returns by id (own returns only)")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (id: string, opts: { json?: boolean }) => {
+      const { returnsShow } = await import("./commands/returns.js");
+      await returnsShow(id, { json: mergeJson(opts) });
     })
   );
 
@@ -379,12 +479,29 @@ program
 // ── slots ──────────────────────────────────────────────────────────────
 program
   .command("slots")
-  .description("Show delivery slots for the current cart")
+  .description("Show the first available delivery slot per service option")
+  .addOption(
+    new Option("--mode <mode>", "Filter to one fulfilment mode").choices([
+      "sixty-min",
+      "one-day",
+      "hyper",
+    ])
+  )
   .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 slots
+  $ checkers60 slots --mode sixty-min
+  $ checkers60 slots --mode one-day
+  $ checkers60 slots --mode hyper    # large-goods (Hyper) — estimate not yet supported
+`
+  )
   .action(
-    wrap(async (opts: { json?: boolean }) => {
+    wrap(async (opts: { mode?: string; json?: boolean }) => {
       const { slots } = await import("./commands/slots.js");
-      await slots({ json: mergeJson(opts) });
+      await slots({ mode: opts.mode, json: mergeJson(opts) });
     })
   );
 

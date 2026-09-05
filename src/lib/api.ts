@@ -161,6 +161,46 @@ export interface PreOrderResult {
   raw?: unknown;
 }
 
+// ─── Raw domain envelopes (orders.ts is the normalization boundary) ──────────
+// These raw shapes are consumed ONLY by src/lib/orders.ts, which maps them to
+// allowlisted DTOs. Commands never import them. Fields are intentionally loose
+// (optional, `unknown` for anything PII-bearing) so the mapper stays the single
+// place that decides what escapes.
+
+export interface RawUserProductScore {
+  productId?: string;
+  count?: number;
+  score?: number;
+}
+
+export interface RawOrderItem {
+  productId?: string;
+  quantity?: number;
+  price?: number;
+  name?: string;
+  productMinInfo?: { name?: string; displayName?: string };
+}
+
+export interface RawCompletedOrder {
+  id?: string;
+  createdOn?: number;
+  serviceOptionId?: string;
+  status?: { orderStatus?: string; name?: string };
+  orderItems?: RawOrderItem[];
+  /** PII-bearing (driver, coords, address) — never read into a DTO. */
+  orderDelivery?: unknown;
+}
+
+export interface RawFirstDeliverySlots {
+  allowASAPDelivery?: boolean;
+  firstAvailableSlotSixtyMin?: { startTime?: string; endTime?: string } | null;
+  firstAvailableSlotOneDay?: { startTime?: string; endTime?: string } | null;
+  deliveryFeesAndMinimumOrderValues?: Record<
+    string,
+    { serviceOption?: string; deliveryFee?: number; minimumOrderValue?: number }
+  >;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Generate a MongoDB-style ObjectId (matches the app's line-item ids). */
@@ -605,6 +645,84 @@ export class CheckersAPI {
       { headers, retry: "safe" }
     );
     return res.data?.orderGroups ?? [];
+  }
+
+  /**
+   * Purchase-frequency scores for the account's products (the "regulars" feed).
+   * `storeIds` is a COMMA-SEPARATED query param (not the JSON storeids header).
+   * Returns the raw score list; orders.ts resolves names/prices and maps a DTO.
+   */
+  async getMyProducts(storeIds?: string): Promise<RawUserProductScore[]> {
+    const headers = await this.headers();
+    const csv = storeIds ?? storeIdList();
+    const res = await request<{ userProductScores?: RawUserProductScore[] }>(
+      "GET",
+      `${CONFIG.ORDERS_API}/api/v3/orders/my-products?storeIds=${encodeURIComponent(csv)}`,
+      { headers, retry: "safe" }
+    );
+    return res.data?.userProductScores ?? [];
+  }
+
+  /** Past (completed) orders — account-scoped. Raw; orders.ts maps to a DTO. */
+  async getCompletedOrders(): Promise<RawCompletedOrder[]> {
+    const headers = await this.headers();
+    const res = await request<{ orders?: RawCompletedOrder[] }>(
+      "GET",
+      `${CONFIG.ORDERS_API}/api/v1/orders/completed-orders`,
+      { headers, retry: "safe" }
+    );
+    return res.data?.orders ?? [];
+  }
+
+  /**
+   * Favourite products. Served by the CATALOG host (not orders-api). The element
+   * shape was empty in capture, so orders.ts extracts ids defensively and
+   * resolves names/prices via the catalog (no PII lives in this response).
+   */
+  async getFavourites(): Promise<unknown[]> {
+    const headers = await this.headers();
+    const res = await request<{ favourites?: unknown[] | null }>(
+      "GET",
+      `${CONFIG.CATALOG_API}/api/v1/products/favourites`,
+      { headers, retry: "safe" }
+    );
+    return res.data?.favourites ?? [];
+  }
+
+  /**
+   * Return groups for the account. Served by the RETURNS host. Raw; orders.ts
+   * maps to an allowlisted DTO (redaction proven via synthetic poison fixtures).
+   */
+  async getReturns(): Promise<{
+    completedReturnGroups?: unknown[];
+    inProgressReturnGroups?: unknown[];
+  }> {
+    const headers = await this.headers();
+    const res = await request<{
+      returns?: { completedReturnGroups?: unknown[]; inProgressReturnGroups?: unknown[] };
+    }>("GET", `${CONFIG.RETURNS_API}/api/v1/return-groups/app/user`, {
+      headers,
+      retry: "safe",
+    });
+    return res.data?.returns ?? {};
+  }
+
+  /**
+   * First available delivery slot per service option. A read-only POST (the app
+   * captures it as POST /api/v3/first-delivery-slots) that needs no cart — the
+   * body carries the store contexts. Raw; orders.ts maps a per-mode DTO.
+   */
+  async getFirstDeliverySlots(
+    stores?: StoreContext[]
+  ): Promise<RawFirstDeliverySlots> {
+    const headers = await this.headers(stores);
+    const storeContexts = stores ?? CONFIG.DEFAULT_STORES;
+    const res = await request<RawFirstDeliverySlots>(
+      "POST",
+      `${CONFIG.ORDERS_API}/api/v3/first-delivery-slots`,
+      { headers, json: { storeContexts }, retry: "safe" }
+    );
+    return res.data ?? {};
   }
 
   // ── Delivery slots (via pre-order; orders-api) ──────────────────────────
