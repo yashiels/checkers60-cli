@@ -78,6 +78,12 @@ export interface PlanAccount {
   mobileHash: string;
 }
 
+/**
+ * A confirmation-bound plan. The envelope (schema/id/timestamps/account/operation)
+ * plus the hardened single-use artifact lifecycle are domain-agnostic. Cart plans
+ * carry `snapshot`+`mutation`; other domains (e.g. favourites) carry a discriminated
+ * `payload`+`preconditions`. Exactly one of the two payload shapes is populated.
+ */
 export interface Plan {
   schemaVersion: number;
   canon: string;
@@ -85,15 +91,38 @@ export interface Plan {
   createdAt: number;
   expiresAt: number;
   account: PlanAccount;
-  operation: CartOperation;
-  snapshot: PlanSnapshot;
-  mutation: MutationIntent;
+  /** Discriminator: "cart.add" | "cart.remove" | "cart.clear" | "fav.add" | "fav.remove" | … */
+  operation: string;
+  /** Cart-domain payload. */
+  snapshot?: PlanSnapshot;
+  mutation?: MutationIntent;
+  /** Generic-domain resolved write inputs (favourites, lists, …). */
+  payload?: Record<string, unknown>;
+  /** Generic-domain preconditions re-validated at confirm. */
+  preconditions?: Record<string, unknown>;
+}
+
+/** The body a caller supplies to {@link writePlan}: exactly one domain shape. */
+export interface PlanBody {
+  snapshot?: PlanSnapshot;
+  mutation?: MutationIntent;
+  payload?: Record<string, unknown>;
+  preconditions?: Record<string, unknown>;
 }
 
 /** The identity-bearing subset of a plan — everything the planId hashes over (timestamps included). */
 type PlanCore = Pick<
   Plan,
-  "schemaVersion" | "canon" | "account" | "operation" | "snapshot" | "mutation" | "createdAt" | "expiresAt"
+  | "schemaVersion"
+  | "canon"
+  | "account"
+  | "operation"
+  | "snapshot"
+  | "mutation"
+  | "payload"
+  | "preconditions"
+  | "createdAt"
+  | "expiresAt"
 >;
 
 /**
@@ -208,14 +237,14 @@ function sweep(dir: string): void {
  * Build, hash, and atomically persist a plan artifact (0600, no-overwrite).
  * Returns the finished plan (with planId/timestamps).
  */
-export function writePlan(
-  account: PlanAccount,
-  operation: CartOperation,
-  snapshot: PlanSnapshot,
-  mutation: MutationIntent
-): Plan {
+export function writePlan(account: PlanAccount, operation: string, body: PlanBody): Plan {
   const dir = ensureDir();
   sweep(dir);
+
+  // Payload-size guard: a plan artifact holds resolved inputs, never bulk data.
+  if (JSON.stringify(body).length > 256 * 1024) {
+    throw new PlanStaleError("Plan payload too large. Refusing.");
+  }
 
   // Timestamps are part of the hashed identity, so the planId, the stored expiry,
   // and the displayed expiry can never disagree.
@@ -225,8 +254,10 @@ export function writePlan(
     canon: PLAN_CANON,
     account,
     operation,
-    snapshot,
-    mutation,
+    snapshot: body.snapshot,
+    mutation: body.mutation,
+    payload: body.payload,
+    preconditions: body.preconditions,
     createdAt: now,
     expiresAt: now + PLAN_TTL_MS,
   };
@@ -299,6 +330,26 @@ export function loadPlan(planId: string, account: PlanAccount): Plan {
     throw new PlanStaleError("Plan artifact is corrupt. Run the preview again.");
   }
 
+  // Runtime envelope validation BEFORE any nested access — a hand-crafted or
+  // corrupt file must never reach domain logic with the wrong shape.
+  const okEnvelope =
+    plan !== null &&
+    typeof plan === "object" &&
+    typeof plan.schemaVersion === "number" &&
+    typeof plan.canon === "string" &&
+    typeof plan.operation === "string" &&
+    typeof plan.planId === "string" &&
+    typeof plan.createdAt === "number" &&
+    typeof plan.expiresAt === "number" &&
+    plan.account !== null &&
+    typeof plan.account === "object" &&
+    typeof plan.account.userId === "string" &&
+    typeof plan.account.uuid === "string" &&
+    typeof plan.account.mobileHash === "string";
+  if (!okEnvelope) {
+    throw new PlanStaleError("Plan artifact has an invalid shape. Run the preview again.");
+  }
+
   if (plan.schemaVersion !== PLAN_SCHEMA_VERSION || plan.canon !== PLAN_CANON) {
     throw new PlanStaleError("Plan artifact is from an incompatible version. Run the preview again.");
   }
@@ -310,6 +361,8 @@ export function loadPlan(planId: string, account: PlanAccount): Plan {
     operation: plan.operation,
     snapshot: plan.snapshot,
     mutation: plan.mutation,
+    payload: plan.payload,
+    preconditions: plan.preconditions,
     createdAt: plan.createdAt,
     expiresAt: plan.expiresAt,
   });

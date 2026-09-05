@@ -216,22 +216,24 @@ interface PlanView {
 }
 
 function planView(plan: Plan, resultCart: CartSnapshot | undefined, name?: string): PlanView {
-  const target = findCart(plan.snapshot, plan.mutation.targetCartId);
+  if (!plan.snapshot || !plan.mutation) {
+    throw new PlanStaleError("Plan is missing its cart payload. Run the preview again.");
+  }
+  const mutation = plan.mutation;
+  const target = findCart(plan.snapshot, mutation.targetCartId);
   return {
-    operation: plan.operation,
+    operation: plan.operation as CartOperation,
     planId: plan.planId,
     expiresAt: plan.expiresAt,
-    mode: plan.mutation.targetServiceOptionId,
-    cartId: plan.mutation.targetCartId,
+    mode: mutation.targetServiceOptionId,
+    cartId: mutation.targetCartId,
     cartVersion: target?.cartVersion ?? Number.NaN,
-    product: plan.mutation.productId
+    product: mutation.productId
       ? {
-          productId: plan.mutation.productId,
+          productId: mutation.productId,
           name,
-          price: plan.mutation.newLine
-            ? (plan.mutation.newLine.price as number)
-            : undefined,
-          quantity: plan.mutation.quantity,
+          price: mutation.newLine ? (mutation.newLine.price as number) : undefined,
+          quantity: mutation.quantity,
         }
       : undefined,
     before: itemCount(target),
@@ -405,7 +407,7 @@ export async function runCartMutation(
     }
     const { intent, displayName } = built;
     const result = applyMutation(snapshot, intent); // validates (throws on unsupported / not-found)
-    const plan = writePlan(acct, operation, snapshot, intent);
+    const plan = writePlan(acct, operation, { snapshot, mutation: intent });
     printPreview(planView(plan, findCart(result, intent.targetCartId), displayName), options);
     return;
   }
@@ -420,6 +422,11 @@ export async function runCartMutation(
   if (plan.schemaVersion !== PLAN_SCHEMA_VERSION || plan.canon !== PLAN_CANON) {
     throw new PlanStaleError("Plan is from an incompatible version. Run the preview again.");
   }
+  if (!plan.snapshot || !plan.mutation) {
+    throw new PlanStaleError("Plan is missing its cart payload. Run the preview again.");
+  }
+  const planSnapshot = plan.snapshot;
+  const planMutation = plan.mutation;
 
   const release = await acquireConfirmLock();
   try {
@@ -428,16 +435,16 @@ export async function runCartMutation(
     if (hasMalformedVersion(fresh)) {
       throw new PlanStaleError("A cart is missing its version. Run the preview again.");
     }
-    if (fingerprint(fresh) !== fingerprint(plan.snapshot)) {
+    if (fingerprint(fresh) !== fingerprint(planSnapshot)) {
       throw new PlanStaleError("The cart changed since the preview. Run the preview again.");
     }
 
     // Rebuild the write EXCLUSIVELY from the fresh snapshot.
-    const intended = applyMutation(fresh, plan.mutation);
+    const intended = applyMutation(fresh, planMutation);
 
     // The whole-cart /carts/update contract rejects an empty line-item list (400);
     // emptying a cart (clear, or removing the last item) uses DELETE instead.
-    const intendedTarget = findCart(intended, plan.mutation.targetCartId);
+    const intendedTarget = findCart(intended, planMutation.targetCartId);
     const willEmpty = !intendedTarget || intendedTarget.lineItems.length === 0;
 
     // Single-use: atomically claim BEFORE dispatch. After this the plan is spent.
@@ -449,7 +456,7 @@ export async function runCartMutation(
     let dispatchError: unknown;
     try {
       if (willEmpty) {
-        await api.deleteCart(plan.mutation.targetCartId);
+        await api.deleteCart(planMutation.targetCartId);
       } else {
         await api.commitCartUpdate(intended);
       }
@@ -470,7 +477,7 @@ export async function runCartMutation(
       );
     }
 
-    const outcome = reconcile(after, intended, plan.snapshot);
+    const outcome = reconcile(after, intended, planSnapshot);
 
     if (outcome === "divergent") {
       throw new DivergentOutcomeError(
@@ -486,7 +493,7 @@ export async function runCartMutation(
     }
     // outcome === "success": the intended state was reached (even if dispatch reported an error).
 
-    const targetCart = findCartByMode(after, plan.mutation.targetServiceOptionId);
+    const targetCart = findCartByMode(after, planMutation.targetServiceOptionId);
     if (options.json) {
       process.stdout.write(
         `${JSON.stringify(

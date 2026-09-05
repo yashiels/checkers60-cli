@@ -556,12 +556,36 @@ Examples:
 // ── fav ────────────────────────────────────────────────────────────────
 program
   .command("fav")
-  .description("List your favourite products")
+  .description("Favourites (Saved Items): list, add, remove")
   .option("--json", "Output JSON", false)
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { fav } = await import("./commands/fav.js");
       await fav({ json: mergeJson(opts) });
+    })
+  );
+
+const favCmd = program.commands.find((c) => c.name() === "fav")!;
+favCmd
+  .command("add <target>")
+  .description("Add a product to favourites (preview by default; --confirm <planId> to apply)")
+  .option("--json", "Output JSON", false)
+  .option("--confirm <planId>", "Apply a previously previewed plan")
+  .action(
+    wrap(async (target: string, opts: { json?: boolean; confirm?: string }) => {
+      const { favAdd } = await import("./commands/fav.js");
+      await favAdd(target, { json: mergeJson(opts), confirm: opts.confirm });
+    })
+  );
+favCmd
+  .command("remove <target>")
+  .description("Remove a product from favourites (preview by default; --confirm <planId> to apply)")
+  .option("--json", "Output JSON", false)
+  .option("--confirm <planId>", "Apply a previously previewed plan")
+  .action(
+    wrap(async (target: string, opts: { json?: boolean; confirm?: string }) => {
+      const { favRemove } = await import("./commands/fav.js");
+      await favRemove(target, { json: mergeJson(opts), confirm: opts.confirm });
     })
   );
 

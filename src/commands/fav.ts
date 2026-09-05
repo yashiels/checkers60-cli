@@ -1,11 +1,23 @@
 import chalk from "chalk";
 import Table from "cli-table3";
+import { CheckersAPI } from "../lib/api.js";
+import { runFavMutation, type FavOptions as FavMutateOptions } from "../lib/favourites-mutate.js";
 import { formatRand } from "../lib/format.js";
 import { getFavourites } from "../lib/orders.js";
 import { startSpinner } from "../lib/output.js";
 
 export interface FavOptions {
   json?: boolean;
+}
+
+/** `fav add <product>` — favourite a product (preview by default; --confirm to apply). */
+export async function favAdd(target: string, options: FavMutateOptions = {}): Promise<void> {
+  await runFavMutation(new CheckersAPI(), "fav.add", target, options);
+}
+
+/** `fav remove <product>` — un-favourite a product (preview by default; --confirm to apply). */
+export async function favRemove(target: string, options: FavMutateOptions = {}): Promise<void> {
+  await runFavMutation(new CheckersAPI(), "fav.remove", target, options);
 }
 
 export async function fav(options: FavOptions = {}): Promise<void> {

@@ -784,6 +784,39 @@ export class CheckersAPI {
   }
 
   /**
+   * The set of favourited product ids. Read side of the favourites toggle; used by
+   * the mutation gate to compute desired state and to reconcile after a write.
+   * Element shape is extracted defensively (id may be a bare string or a
+   * `{productId}` object).
+   */
+  async getFavouriteIds(): Promise<Set<string>> {
+    const favourites = await this.getFavourites();
+    const ids = new Set<string>();
+    for (const f of favourites) {
+      if (typeof f === "string") ids.add(f);
+      else if (f && typeof f === "object") {
+        const pid = (f as { productId?: unknown; id?: unknown }).productId ?? (f as { id?: unknown }).id;
+        if (typeof pid === "string") ids.add(pid);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Toggle a product's favourite (Saved Items) flag. Captured contract:
+   * `POST /api/v1/products/favourites/{productId}` (catalog host) with body
+   * `{isFavourite: true|false}` → 201. Idempotent per-product; `retry:"never"`.
+   */
+  async setFavourite(productId: string, isFavourite: boolean): Promise<void> {
+    const headers = await this.headers();
+    await request(
+      "POST",
+      `${CONFIG.CATALOG_API}/api/v1/products/favourites/${encodeURIComponent(productId)}`,
+      { headers, json: { isFavourite }, retry: "never" }
+    );
+  }
+
+  /**
    * Backup/replacement candidates for a product. Served by the CATALOG host as
    * `POST /api/v1/products/user-alternatives`; the body carries the product ids
    * and store contexts. The response is a map of requested-product-id →
