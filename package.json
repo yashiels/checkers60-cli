@@ -1,6 +1,6 @@
 {
   "name": "checkers60-cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "CLI for Checkers Sixty60 grocery delivery — search, cart, orders, reorder",
   "type": "module",
   "bin": {
