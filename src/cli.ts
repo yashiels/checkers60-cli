@@ -270,52 +270,84 @@ program
 // ── add ────────────────────────────────────────────────────────────────
 program
   .command("add <target> [qty]")
-  .description("Add a product to the cart by search term or product id")
+  .description("Add a product to the cart (preview by default; --confirm <planId> to apply)")
   .option("--json", "Output JSON", false)
+  .option("--mode <mode>", "Target cart: sixty-min (default) or one-day")
+  .option("--confirm <planId>", "Apply a previously previewed plan")
   .addHelpText(
     "after",
     `
+Writes are two-step: preview prints a plan id and exits 5; re-run with --confirm to apply.
+
 Examples:
-  $ checkers60 add "simple truth coconut water" 3
-  $ checkers60 add 5d3b1d78e2f18700089552a8
+  $ checkers60 add "simple truth coconut water" 3            # preview → plan id
+  $ checkers60 add "simple truth coconut water" 3 --confirm sha256:…
+  $ checkers60 add 5d3b1d78e2f18700089552a8 --mode one-day
 `
   )
   .action(
-    wrap(async (target: string, qty: string | undefined, opts: { json?: boolean }) => {
-      const { add } = await import("./commands/add.js");
-      await add(target, qty ? parseInt(qty, 10) : 1, { json: mergeJson(opts) });
-    })
+    wrap(
+      async (
+        target: string,
+        qty: string | undefined,
+        opts: { json?: boolean; mode?: string; confirm?: string }
+      ) => {
+        const { add } = await import("./commands/add.js");
+        await add(target, qty === undefined ? 1 : parseInt(qty, 10), {
+          json: mergeJson(opts),
+          mode: opts.mode,
+          confirm: opts.confirm,
+        });
+      }
+    )
   );
 
 // ── remove ─────────────────────────────────────────────────────────────
 program
-  .command("remove <target>")
-  .description("Remove a product from the cart by name or product id")
+  .command("remove <target> [qty]")
+  .description("Remove a product from the cart (preview by default; --confirm <planId> to apply)")
   .option("--json", "Output JSON", false)
+  .option("--mode <mode>", "Target cart: sixty-min (default) or one-day")
+  .option("--confirm <planId>", "Apply a previously previewed plan")
   .addHelpText(
     "after",
     `
+Omit qty to remove the whole line; give qty to decrement. Preview prints a plan id (exit 5).
+
 Examples:
-  $ checkers60 remove "coconut water"
-  $ checkers60 remove 5d3b1d78e2f18700089552a8
+  $ checkers60 remove "coconut water"                        # preview → plan id
+  $ checkers60 remove "coconut water" --confirm sha256:…
+  $ checkers60 remove 5d3b1d78e2f18700089552a8 2 --confirm sha256:…
 `
   )
   .action(
-    wrap(async (target: string, opts: { json?: boolean }) => {
-      const { remove } = await import("./commands/remove.js");
-      await remove(target, { json: mergeJson(opts) });
-    })
+    wrap(
+      async (
+        target: string,
+        qty: string | undefined,
+        opts: { json?: boolean; mode?: string; confirm?: string }
+      ) => {
+        const { remove } = await import("./commands/remove.js");
+        await remove(target, qty === undefined ? undefined : parseInt(qty, 10), {
+          json: mergeJson(opts),
+          mode: opts.mode,
+          confirm: opts.confirm,
+        });
+      }
+    )
   );
 
 // ── clear ──────────────────────────────────────────────────────────────
 program
   .command("clear")
-  .description("Empty the cart")
+  .description("Empty the cart (preview by default; --confirm <planId> to apply)")
   .option("--json", "Output JSON", false)
+  .option("--mode <mode>", "Target cart: sixty-min (default) or one-day")
+  .option("--confirm <planId>", "Apply a previously previewed plan")
   .action(
-    wrap(async (opts: { json?: boolean }) => {
+    wrap(async (opts: { json?: boolean; mode?: string; confirm?: string }) => {
       const { clear } = await import("./commands/clear.js");
-      await clear({ json: mergeJson(opts) });
+      await clear({ json: mergeJson(opts), mode: opts.mode, confirm: opts.confirm });
     })
   );
 

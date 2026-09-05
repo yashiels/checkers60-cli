@@ -1,35 +1,21 @@
-import chalk from "chalk";
 import { CheckersAPI } from "../lib/api.js";
-import { startSpinner } from "../lib/output.js";
+import { runCartMutation, type MutateOptions } from "../lib/cart-mutate.js";
 
-export interface ClearOptions {
-  json?: boolean;
-}
+export type ClearOptions = MutateOptions;
 
 export async function clear(options: ClearOptions = {}): Promise<void> {
-  const { json = false } = options;
-  const spinner = json ? null : startSpinner("Clearing cart…");
-
   const api = new CheckersAPI();
-  const state = await api.getCart();
 
-  if (!state.cartId || state.items.length === 0) {
-    spinner?.stop();
-    if (json) {
-      process.stdout.write(`${JSON.stringify({ cleared: false, reason: "empty-cart" }, null, 2)}\n`);
-      return;
+  await runCartMutation(api, "cart.clear", options, async (targetCart, serviceOptionId) => {
+    if (targetCart.lineItems.length === 0) {
+      return { noop: true, reason: `The ${serviceOptionId} cart is already empty.` };
     }
-    process.stdout.write(`${chalk.dim("Cart is already empty.")}\n`);
-    return;
-  }
-
-  const removed = state.items.length;
-  await api.clearCart(state.cartId);
-  spinner?.stop();
-
-  if (json) {
-    process.stdout.write(`${JSON.stringify({ cleared: true, removed }, null, 2)}\n`);
-    return;
-  }
-  process.stdout.write(`${chalk.green(`✅ Cart cleared (${removed} item(s) removed).`)}\n`);
+    return {
+      intent: {
+        operation: "cart.clear",
+        targetCartId: targetCart.cartId,
+        targetServiceOptionId: serviceOptionId,
+      },
+    };
+  });
 }

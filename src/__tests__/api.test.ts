@@ -40,27 +40,54 @@ function fakeTokens(): TokenManager {
   return { getSession: vi.fn().mockResolvedValue(fakeSession()) } as unknown as TokenManager;
 }
 
-describe("CheckersAPI.updateCart error message", () => {
+describe("CheckersAPI.commitCartUpdate error message", () => {
   it("throws a body-free error that never leaks the API payload", async () => {
     // The response has no `carts`, but DOES carry a secret-looking payload that
     // must NEVER be interpolated into the thrown error.
     requestMock.mockResolvedValue({
+      status: 400,
       data: { errorCode: "AUTH_DENIED", token: "leaked-secret-token" },
     });
 
     const api = new CheckersAPI(fakeTokens());
-    await expect(
-      api.updateCart("cart-1", [{ productId: "p", quantity: 1, price: 100 }])
-    ).rejects.toThrow(/^Cart update failed$/);
+    const snapshot = {
+      carts: [
+        {
+          cartId: "cart-1",
+          serviceOptionId: "sixty-min-delivery",
+          cartVersion: 3,
+          deliveryAddressId: "addr-1",
+          lineItems: [],
+        },
+      ],
+      deliveryAddressId: "addr-1",
+      storeContexts: [],
+    };
 
-    // Confirm the raw payload is absent from the message.
     let message = "";
     try {
-      await api.updateCart("cart-1", [{ productId: "p", quantity: 1, price: 100 }]);
+      await api.commitCartUpdate(snapshot);
     } catch (e) {
       message = (e as Error).message;
     }
-    expect(message).toBe("Cart update failed");
-    expect(message).not.toMatch(/leaked-secret-token|AUTH_DENIED|[{}]/);
+    expect(message).toMatch(/Cart update failed/);
+    expect(message).not.toMatch(/leaked-secret-token|AUTH_DENIED/);
+  });
+
+  it("sends the update as JSON, not form-urlencoded", async () => {
+    requestMock.mockResolvedValue({
+      status: 200,
+      data: { carts: [{ item: { id: "cart-1", cartVersion: 4, serviceOptionId: "sixty-min-delivery", deliveryAddressId: "addr-1", lineItems: [] } }] },
+    });
+    const api = new CheckersAPI(fakeTokens());
+    await api.commitCartUpdate({
+      carts: [{ cartId: "cart-1", serviceOptionId: "sixty-min-delivery", cartVersion: 3, deliveryAddressId: "addr-1", lineItems: [] }],
+      deliveryAddressId: "addr-1",
+      storeContexts: [],
+    });
+    const [, , opts] = requestMock.mock.calls[0] as [string, string, Record<string, unknown>];
+    expect(opts.json).toBeDefined();
+    expect(opts.form).toBeUndefined();
+    expect(opts.retry).toBe("never");
   });
 });

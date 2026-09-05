@@ -8,6 +8,7 @@ import {
 import { TokenManager, type SessionContext } from "./credentials.js";
 import { getDeviceId } from "./runtime.js";
 import { request, APIError } from "./http.js";
+import type { CartSnapshot, PlanSnapshot } from "./confirm.js";
 import {
   normalizeBonusBuys,
   type BonusBuy,
@@ -88,6 +89,7 @@ interface CartEnvelope {
     id?: string;
     cartVersion?: number;
     serviceOptionId?: string;
+    deliveryAddressId?: string;
     lineItems?: CartLineItem[];
   };
 }
@@ -512,80 +514,102 @@ export class CheckersAPI {
   }
 
   /**
-   * Replace the cart's line items. The API ignores omitted items, so to remove
-   * something you must include it with quantity 0.
+   * Full multi-cart snapshot for the MUTATION path. Unlike {@link getCart} (a
+   * read-only view of the primary cart), this returns EVERY cart with its
+   * cartVersion, delivery address, and full raw line items preserved field-for-
+   * field — the shape the captured whole-cart `/carts/update` contract must
+   * round-trip. `storeContexts` is the configured store set (deterministic,
+   * hashed into the plan id).
    */
-  async updateCart(
-    cartId: string,
-    items: CartItemInput[],
-    addressId?: string
-  ): Promise<CartState> {
+  async getCarts(stores?: StoreContext[]): Promise<PlanSnapshot> {
+    const storeContexts = stores ?? CONFIG.DEFAULT_STORES;
+    const headers = await this.headers(stores);
+    const res = await request<CartsResponse>(
+      "POST",
+      `${CONFIG.ORDERS_API}/api/v2/carts/user?useProductMinInfoAnnotation=true`,
+      { headers, json: { storeContexts }, retry: "safe" }
+    );
+
+    const carts: CartSnapshot[] = (res.data?.carts ?? [])
+      .map((c) => c.item)
+      .filter((item): item is NonNullable<CartEnvelope["item"]> => !!item?.id)
+      .map((item) => ({
+        cartId: item.id as string,
+        serviceOptionId: item.serviceOptionId ?? "",
+        // Absence is preserved as NaN so the confirm guard refuses (never coerced to 0).
+        cartVersion: typeof item.cartVersion === "number" ? item.cartVersion : Number.NaN,
+        deliveryAddressId: item.deliveryAddressId ?? "",
+        lineItems: (item.lineItems ?? []) as unknown as Record<string, unknown>[],
+      }));
+
+    const withAddr = carts.find((c) => c.deliveryAddressId);
+    return {
+      carts,
+      deliveryAddressId: withAddr?.deliveryAddressId ?? "",
+      storeContexts: storeContexts as unknown[],
+    };
+  }
+
+  /**
+   * Dispatch the captured whole-cart update built EXCLUSIVELY from a fresh
+   * snapshot. Sends every cart (both delivery modes), the cart's current address,
+   * and the configured store contexts, as JSON (the captured wire encoding —
+   * the old form-urlencoded body was the 400 bug). `retry:"never"`: a cart write
+   * is never safe to auto-retry. Returns the server's post-write snapshot.
+   */
+  async commitCartUpdate(snapshot: PlanSnapshot): Promise<PlanSnapshot> {
     const headers = await this.headers();
-
-    const lineItems = items.map((item) => ({
-      id: item.lineItemId ?? objectId(),
-      status: "available",
-      price: item.price,
-      priceFactor: item.priceFactor ?? 100,
-      previousPrice: 0,
-      productId: item.productId,
-      instruction: "",
-      quantity: item.quantity,
-      specialInstruction: "",
-      storeId: item.storeId ?? CONFIG.DEFAULT_STORES[0].storeId,
-      replacementPreferenceId: "",
-      missionName: "",
-      missionType: "",
-      addToBasketType: "pdp_add_to_basket",
-      addToBasketJourney: "main_search_results",
-      serviceOptionId: "sixty-min-delivery",
-      isStockAvailable: true,
-      requiresOver18: false,
-      isSponsoredProduct: false,
-      hasAlcohol: false,
-      product: null,
-    }));
-
     const body = {
-      carts: [{ id: cartId, serviceOptionId: "sixty-min-delivery", lineItems }],
-      deliveryAddressId: addressId ?? CONFIG.DEFAULT_ADDRESS_ID,
-      storeContexts: CONFIG.DEFAULT_STORES,
+      carts: snapshot.carts.map((c) => ({
+        id: c.cartId,
+        serviceOptionId: c.serviceOptionId,
+        lineItems: c.lineItems,
+      })),
+      deliveryAddressId: snapshot.deliveryAddressId,
+      storeContexts: snapshot.storeContexts,
     };
 
     const res = await request<CartsResponse>(
       "POST",
       `${CONFIG.ORDERS_API}/api/v3/carts/update?useProductMinInfoAnnotation=true`,
-      { headers, form: body } // app quirk: form-urlencoded JSON body
+      { headers, json: body, retry: "never" }
     );
 
     if (!res.data?.carts) {
-      throw new Error("Cart update failed");
+      throw new APIError(res.status, "Cart update failed", "", "carts/update");
     }
-    const cart = res.data.carts[0]?.item;
+    const carts: CartSnapshot[] = res.data.carts
+      .map((c) => c.item)
+      .filter((item): item is NonNullable<CartEnvelope["item"]> => !!item?.id)
+      .map((item) => ({
+        cartId: item.id as string,
+        serviceOptionId: item.serviceOptionId ?? "",
+        cartVersion: typeof item.cartVersion === "number" ? item.cartVersion : Number.NaN,
+        deliveryAddressId: item.deliveryAddressId ?? "",
+        lineItems: (item.lineItems ?? []) as unknown as Record<string, unknown>[],
+      }));
+    const withAddr = carts.find((c) => c.deliveryAddressId);
     return {
-      carts: res.data.carts,
-      cartId: cart?.id ?? cartId,
-      cartVersion: cart?.cartVersion ?? 0,
-      items: cart?.lineItems ?? [],
+      carts,
+      deliveryAddressId: withAddr?.deliveryAddressId ?? snapshot.deliveryAddressId,
+      storeContexts: snapshot.storeContexts,
     };
   }
 
-  /** Empty the cart by setting every line item's quantity to 0. */
-  async clearCart(cartId: string, addressId?: string): Promise<CartState> {
-    const { items } = await this.getCart();
-    if (items.length === 0) {
-      return { carts: [], cartId, cartVersion: 0, items: [] };
-    }
-    return this.updateCart(
-      cartId,
-      items.map((i) => ({
-        productId: i.productId,
-        quantity: 0,
-        price: i.price,
-        storeId: i.storeId,
-        lineItemId: i.id,
-      })),
-      addressId
+  /**
+   * Empty a cart. The whole-cart `/carts/update` contract REJECTS an empty (or
+   * all-zero-quantity) line-item list with HTTP 400 ("Failed to update your
+   * basket."), so removing the last item / clearing goes through the captured
+   * `DELETE /api/v1/carts/{cartId}` instead (verified 200). The server rotates in
+   * a fresh empty cart id afterward, so callers must re-read to reconcile.
+   * `retry:"never"`.
+   */
+  async deleteCart(cartId: string): Promise<void> {
+    const headers = await this.headers();
+    await request(
+      "DELETE",
+      `${CONFIG.ORDERS_API}/api/v1/carts/${encodeURIComponent(cartId)}`,
+      { headers, retry: "never" }
     );
   }
 

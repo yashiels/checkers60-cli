@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import { writeSync } from "node:fs";
 import { APIError } from "./api.js";
+import { PlanStaleError } from "./confirm.js";
 import { isJson, isVerbose, logError } from "./output.js";
 
 /**
@@ -10,15 +11,34 @@ import { isJson, isVerbose, logError } from "./output.js";
  *   2 — invalid usage
  *   3 — authentication (401/403, not logged in)
  *   4 — network (timeout, DNS, connection reset/refused)
+ *   5 — confirmation required / plan stale (re-run the preview)
+ *   6 — outcome unknown/divergent after a dispatched write (reconcile manually)
  */
 export const EXIT_OK = 0;
 export const EXIT_FAILURE = 1;
 export const EXIT_USAGE = 2;
 export const EXIT_AUTH = 3;
 export const EXIT_NETWORK = 4;
+export const EXIT_CONFIRM = 5;
+export const EXIT_DIVERGENT = 6;
 
 export class UsageError extends Error {
   readonly isUsage = true;
+}
+
+/**
+ * A dispatched cart write whose outcome could not be reconciled to either the
+ * intended state or the original state. NEVER auto-retried. Carries a read-only
+ * reconcile hint so a human/agent can inspect the true cart state.
+ */
+export class DivergentOutcomeError extends Error {
+  readonly isDivergent = true;
+  constructor(
+    message: string,
+    readonly reconcile = "checkers60 cart --json"
+  ) {
+    super(message);
+  }
 }
 
 interface Classified {
@@ -29,6 +49,8 @@ interface Classified {
   status?: number;
   /** Verbose-only, URL-redacted status line (never a body). */
   verboseLine?: string;
+  /** Read-only reconcile hint (divergent-outcome only). */
+  reconcile?: string;
 }
 
 const NETWORK_RE =
@@ -52,6 +74,14 @@ function isNetworkError(err: Error): boolean {
 export function classifyError(err: unknown): Classified {
   if (err instanceof UsageError) {
     return { message: err.message, code: EXIT_USAGE };
+  }
+
+  if (err instanceof PlanStaleError) {
+    return { message: err.message, code: EXIT_CONFIRM };
+  }
+
+  if (err instanceof DivergentOutcomeError) {
+    return { message: err.message, code: EXIT_DIVERGENT, reconcile: err.reconcile };
   }
 
   if (err instanceof APIError) {
@@ -96,16 +126,21 @@ export function handleError(err: unknown): void {
   process.exitCode = c.code;
 
   if (isJson()) {
-    const envelope: { error: string; code: number; status?: number } = {
+    const envelope: { error: string; code: number; status?: number; reconcile?: string } = {
       error: c.message,
       code: c.code,
     };
     if (c.status !== undefined) envelope.status = c.status;
+    if (c.reconcile !== undefined) envelope.reconcile = c.reconcile;
     writeSync(1, `${JSON.stringify(envelope)}\n`);
     return;
   }
 
   logError(c.message);
+
+  if (c.reconcile) {
+    process.stderr.write(`${chalk.dim("   Reconcile: ")}${chalk.cyan(c.reconcile)}\n`);
+  }
 
   if (c.code === EXIT_AUTH && (err instanceof APIError || /Not logged in/i.test(c.message))) {
     process.stderr.write(
