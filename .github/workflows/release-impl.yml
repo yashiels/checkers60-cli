@@ -149,18 +149,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update Homebrew tap
+      - name: Update Homebrew tap (signed commit)
         env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          # HOMEBREW_TAP_TOKEN is owned by a bypass user, so createCommitOnBranch
+          # lands a GitHub-signed ("Verified") commit that also satisfies the
+          # tap's branch ruleset — unlike a plain github-actions[bot] git push.
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           SHA="${{ steps.tarballs.outputs.macos_sha }}"
-
-          WORK=$(mktemp -d)
-          git clone "https://github.com/yashiels/homebrew-tap.git" "$WORK"
-          cd "$WORK"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          TAP="yashiels/homebrew-tap"
+          BRANCH="main"
+          FORMULA="checkers60"
 
           python3 -c "
           v, s = '${VERSION}', '${SHA}'
@@ -186,14 +187,30 @@ jobs:
           end
           '''
           import textwrap
-          open('Formula/checkers60.rb', 'w').write(textwrap.dedent(formula).lstrip())
+          open('formula.rb', 'w').write(textwrap.dedent(formula).lstrip())
           "
 
-          git add Formula/checkers60.rb
-          git commit -m "chore: bump checkers60 to v${VERSION}"
-          git remote set-url origin "https://x-access-token:${TAP_TOKEN}@github.com/yashiels/homebrew-tap.git"
-          git push origin main
-          echo "Homebrew tap updated to v${VERSION}"
+          b64=$(base64 < formula.rb | tr -d '\n')
+
+          for attempt in 1 2 3 4 5; do
+            oid=$(gh api "repos/${TAP}/git/ref/heads/${BRANCH}" --jq '.object.sha')
+            payload=$(jq -n \
+              --arg repo "$TAP" --arg branch "$BRANCH" --arg oid "$oid" \
+              --arg headline "${FORMULA}: update formula for v${VERSION}" \
+              --arg path "Formula/${FORMULA}.rb" --arg c "$b64" \
+              '{query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { url } } }",
+                variables: {input: {branch: {repositoryNameWithOwner: $repo, branchName: $branch}, expectedHeadOid: $oid, message: {headline: $headline}, fileChanges: {additions: [{path: $path, contents: $c}]}}}}')
+            if out=$(printf '%s' "$payload" | gh api graphql --input - 2>&1); then
+              url=$(printf '%s' "$out" | jq -r '.data.createCommitOnBranch.commit.url // empty')
+              if [ -n "$url" ]; then echo "Homebrew tap updated (verified): $url"; exit 0; fi
+              echo "attempt $attempt: no commit in response: $out"
+            else
+              echo "attempt $attempt failed: $out"
+            fi
+            sleep $((attempt * 2))
+          done
+          echo "Failed to update Homebrew tap after retries" >&2
+          exit 1
 
       - name: Upload artifacts
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4
