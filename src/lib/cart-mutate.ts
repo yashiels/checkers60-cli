@@ -203,6 +203,32 @@ function itemCount(cart: CartSnapshot | undefined): number {
   return cart.lineItems.reduce((n, li) => n + (Number(li.quantity) || 0), 0);
 }
 
+/**
+ * Translate the intended snapshot into the body the `/carts/update` contract
+ * actually honors. That endpoint MERGES the lines it receives into the server
+ * cart (upsert by line id) and does NOT delete a line just because it was
+ * omitted — so a removal expressed by dropping the line is silently lost. A line
+ * is only deleted when it's sent back with quantity 0 (a tombstone). So for every
+ * line present in the pre-write snapshot but no longer in the intended one, re-add
+ * it with quantity 0. (Verified against the live API: an omitted line persists; a
+ * quantity-0 line is deleted. `reconcile` still runs against the clean `intended`,
+ * where tombstones don't exist.)
+ */
+export function buildWriteSnapshot(previous: PlanSnapshot, intended: PlanSnapshot): PlanSnapshot {
+  const out = clone(intended);
+  for (const cart of out.carts) {
+    const prev = findCart(previous, cart.cartId);
+    if (!prev) continue;
+    const keptIds = new Set(cart.lineItems.map((li) => String(li.id)));
+    for (const li of prev.lineItems) {
+      if (!keptIds.has(String(li.id))) {
+        cart.lineItems.push({ ...li, quantity: 0 });
+      }
+    }
+  }
+  return out;
+}
+
 interface PlanView {
   operation: CartOperation;
   planId: string;
@@ -456,7 +482,7 @@ export async function runCartMutation(
       if (willEmpty) {
         await api.deleteCart(planMutation.targetCartId);
       } else {
-        await api.commitCartUpdate(intended);
+        await api.commitCartUpdate(buildWriteSnapshot(fresh, intended));
       }
     } catch (err) {
       dispatchFailed = true;

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CheckersAPI } from "../lib/api.js";
-import { runCartMutation } from "../lib/cart-mutate.js";
+import { buildWriteSnapshot, runCartMutation } from "../lib/cart-mutate.js";
 import type { MutationIntent, PlanSnapshot } from "../lib/confirm.js";
 import { plansDir, PlanStaleError } from "../lib/confirm.js";
 import { DivergentOutcomeError, EXIT_CONFIRM, UsageError } from "../lib/errors.js";
@@ -57,6 +57,37 @@ function line(over: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
+/**
+ * Model the real `/carts/update` server semantics: MERGE the sent lines into the
+ * current state (upsert by line id), delete any line sent with quantity 0, and
+ * leave omitted lines untouched. Used by the fake's default commit path so tests
+ * exercise the same tombstone requirement the live API enforces.
+ */
+function mergeCartUpdate(current: PlanSnapshot, sent: PlanSnapshot): PlanSnapshot {
+  const next = structuredClone(current);
+  next.deliveryAddressId = sent.deliveryAddressId;
+  for (const sentCart of sent.carts) {
+    const target = next.carts.find((c) => c.cartId === sentCart.cartId);
+    if (!target) {
+      next.carts.push(structuredClone(sentCart));
+      continue;
+    }
+    target.deliveryAddressId = sentCart.deliveryAddressId;
+    for (const li of sentCart.lineItems) {
+      const id = String(li.id);
+      const idx = target.lineItems.findIndex((x) => String(x.id) === id);
+      if ((Number(li.quantity) || 0) === 0) {
+        if (idx >= 0) target.lineItems.splice(idx, 1);
+      } else if (idx >= 0) {
+        target.lineItems[idx] = structuredClone(li);
+      } else {
+        target.lineItems.push(structuredClone(li));
+      }
+    }
+  }
+  return next;
+}
+
 interface FakeAPI {
   api: CheckersAPI;
   getCarts: ReturnType<typeof vi.fn>;
@@ -93,8 +124,18 @@ function fakeApi(
       // eslint-disable-next-line @typescript-eslint/no-throw-literal
       throw opts.throwOnCommit;
     }
-    const r = opts.onCommit ? opts.onCommit(s) : undefined;
-    state = structuredClone(r ?? s);
+    if (opts.onCommit) {
+      // Tests that use onCommit author the post-state directly (divergence, lost
+      // update, weird server responses), so it fully controls the outcome.
+      const r = opts.onCommit(s);
+      state = structuredClone(r ?? s);
+    } else {
+      // Model the real /carts/update contract: MERGE the sent lines into the
+      // current cart (upsert by line id), delete any line sent with quantity 0,
+      // and leave omitted lines untouched. A fake that replaced state wholesale
+      // hid the tombstone requirement (an omitted removal silently "worked").
+      state = mergeCartUpdate(state, s);
+    }
     if (opts.throwAfterApply) throw new Error("connection reset after apply");
     return structuredClone(state);
   });
@@ -627,5 +668,61 @@ describe("cart mutation gate — split-line removal", () => {
       .filter((li) => li.productId === "PROD")
       .reduce((n, li) => n + (Number(li.quantity) || 0), 0);
     expect(totalQty).toBe(2);
+  });
+
+  // Regression: removing one product from a multi-product cart (cart NOT emptied,
+  // so it goes through /carts/update, not DELETE). The endpoint MERGES lines, so a
+  // removal expressed by omission is silently ignored — the item stays. The write
+  // must send a quantity-0 tombstone. Before the fix the final state still had PROD.
+  it("removes only the target product from a multi-product cart (tombstone, not omission)", async () => {
+    const start = snapshot([
+      line({ id: "p", productId: "PROD", quantity: 1 }),
+      line({ id: "k", productId: "KEEP", quantity: 1 }),
+    ]);
+    const f = fakeApi(start);
+    const planId = await preview(f, removeProd(), "cart.remove");
+    await runCartMutation(f.api, "cart.remove", { json: true, confirm: planId }, removeProd());
+    expect(f.commit).toHaveBeenCalledOnce();
+    expect(f.del).not.toHaveBeenCalled();
+    const final = (await f.getCarts()) as PlanSnapshot;
+    const t = final.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!;
+    expect(t.lineItems.map((li) => li.productId).sort()).toEqual(["KEEP"]);
+  });
+});
+
+describe("buildWriteSnapshot (tombstones for the merge-semantics /carts/update)", () => {
+  const target = (s: PlanSnapshot) =>
+    s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!;
+
+  it("emits a quantity-0 tombstone for a line the mutation dropped", () => {
+    const prev = snapshot([line({ id: "keep", productId: "A" }), line({ id: "drop", productId: "B" })]);
+    const intended = snapshot([line({ id: "keep", productId: "A" })]);
+    const t = target(buildWriteSnapshot(prev, intended));
+    expect(t.lineItems.find((li) => li.id === "drop")?.quantity).toBe(0);
+    expect(t.lineItems.find((li) => li.id === "keep")?.quantity).toBe(1);
+  });
+
+  it("adds no tombstone for a pure add", () => {
+    const prev = snapshot([line({ id: "a", productId: "A" })]);
+    const intended = snapshot([line({ id: "a", productId: "A" }), line({ id: "b", productId: "B" })]);
+    const t = target(buildWriteSnapshot(prev, intended));
+    expect(t.lineItems).toHaveLength(2);
+    expect(t.lineItems.every((li) => (Number(li.quantity) || 0) > 0)).toBe(true);
+  });
+
+  it("keeps a decremented line by id without tombstoning it", () => {
+    const prev = snapshot([line({ id: "a", productId: "A", quantity: 5 })]);
+    const intended = snapshot([line({ id: "a", productId: "A", quantity: 2 })]);
+    const t = target(buildWriteSnapshot(prev, intended));
+    expect(t.lineItems).toHaveLength(1);
+    expect(t.lineItems[0].quantity).toBe(2);
+  });
+
+  it("does not mutate the intended snapshot it was given", () => {
+    const prev = snapshot([line({ id: "a" }), line({ id: "b", productId: "B" })]);
+    const intended = snapshot([line({ id: "a" })]);
+    const before = structuredClone(intended);
+    buildWriteSnapshot(prev, intended);
+    expect(intended).toEqual(before);
   });
 });
