@@ -591,12 +591,34 @@ ordersCmd
 program
   .command("track <reference>")
   .description("Show status for one of your orders (own orders only)")
+  .option("--watch", "Poll status until the order is delivered/cancelled", false)
+  .option("--interval <seconds>", "Seconds between polls in --watch mode (min 10)", "30")
   .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 track ABC123            # one-shot status
+  $ checkers60 track ABC123 --watch    # live status progression until delivered
+
+Live driver position + precise ETA are served by the app over a websocket and are
+not available here; --watch reports order status progression from orders/groups.
+`
+  )
   .action(
-    wrap(async (reference: string, opts: { json?: boolean }) => {
-      const { track } = await import("./commands/track.js");
-      await track(reference, { json: mergeJson(opts) });
-    })
+    wrap(
+      async (
+        reference: string,
+        opts: { json?: boolean; watch?: boolean; interval: string }
+      ) => {
+        const { track } = await import("./commands/track.js");
+        await track(reference, {
+          json: mergeJson(opts),
+          watch: opts.watch,
+          interval: parseCount(opts.interval, "interval"),
+        });
+      }
+    )
   );
 
 // ── regulars ───────────────────────────────────────────────────────────

@@ -90,10 +90,18 @@ export interface OrderDetailDTO {
 }
 
 /**
- * Tracking snapshot for one order (`track`). Detailed live ETA (driver
- * position, precise slot) comes from `order-groups-info`, which is 405 on GET
- * and deferred — so ETA/slot are null here and status comes from orders/groups.
- * Driver name/phone/coordinates are NEVER included.
+ * Tracking snapshot for one order (`track`). Status + one-hour slot come from the
+ * captured `orders/groups` read; `track --watch` polls this for status progression.
+ *
+ * Richer LIVE tracking — the driver's live position and a precise moving ETA — is
+ * NOT served by a plain read: the apk bundle shows the app fetches an order-info
+ * snapshot from `POST /api/v3/orders/order-groups-info` (it is 405 on GET) and then
+ * receives real-time updates over a websocket channel (bundle flag
+ * `super-app-enable-websockets`). Both require an order that is actively OUT FOR
+ * DELIVERY to capture their request/response and message shapes, so they are
+ * intentionally not implemented here rather than guessed. When such a capture is
+ * done, wire `getOrderGroupsInfo` (below) + the websocket as the live source; until
+ * then `eta`/`slot` stay null. Driver name/phone/coordinates are NEVER included.
  */
 export interface TrackDTO {
   reference: string;
