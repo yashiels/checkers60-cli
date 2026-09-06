@@ -253,9 +253,30 @@ export interface MinimumOrderDTO {
 }
 
 /**
+ * Informational selection block for `checkout --preview`. Delivery slot and
+ * driver tip are CLIENT-TRANSIENT — chosen in the app at place-order time and
+ * NOT persisted by this read-only CLI — so these are examples only:
+ * `deliverySlots` are the first-available slots per mode (from
+ * `first-delivery-slots`, cart-independent, `CONFIG.DEFAULT_STORES`), already
+ * allowlisted `SlotDTO`s; `tipPresetsCents` are the app's fixed preset amounts;
+ * `customTipAllowed` reflects that a custom amount is also selectable in the app.
+ */
+export interface CheckoutSelectionInfoDTO {
+  /** Plain-language note that slot + tip are chosen in the app, not stored here. */
+  note: string;
+  /** First-available delivery slots per mode (informational examples). */
+  deliverySlots: SlotDTO[];
+  /** Example driver-tip preset amounts in cents (the app's fixed presets). */
+  tipPresetsCents: number[];
+  /** Whether a custom tip amount is also selectable in the app. */
+  customTipAllowed: boolean;
+}
+
+/**
  * `checkout --preview` output: a READ-ONLY totals preview for the current
  * populated cart, derived from the existing pre-order response
- * (`getDeliverySlots().totals`) — no new request, no place-order/tip/payment.
+ * (`getDeliverySlots().totals`), plus an informational `selectionInfo` block
+ * (delivery-slot examples + tip presets — never a place-order/tip/payment write).
  *
  * The pre-order `totals` wire shape is NOT captured in this app version, so the
  * mapper reads a best-effort set of field-name candidates and the fee breakdown
@@ -282,12 +303,34 @@ export interface CheckoutPreviewDTO {
   quoteId: string | null;
   /** Quote expiry as ISO-8601 when present and valid. */
   quoteExpiry: string | null;
+  /** Informational slot/tip examples — selected in the app, never stored here. */
+  selectionInfo: CheckoutSelectionInfoDTO;
   /** Guidance for the empty-cart case; null when totals are present. */
   message: string | null;
 }
 
 export const CHECKOUT_EMPTY_CART_MESSAGE =
   "Add items to your cart before previewing checkout totals.";
+
+/** Example driver-tip presets in cents (R10 / R20 / R30 / R50) — the app's fixed set. */
+export const CHECKOUT_TIP_PRESETS_CENTS: readonly number[] = [1000, 2000, 3000, 5000];
+
+export const CHECKOUT_SELECTION_NOTE =
+  "Delivery slot and driver tip are selected in the app when you pay — this CLI does not store them.";
+
+/**
+ * Build the informational selection block. `deliverySlots` are already
+ * allowlisted `SlotDTO`s; the tip presets are fixed constants copied into a
+ * fresh array so the exported constant can never be mutated by a caller.
+ */
+export function buildCheckoutSelectionInfo(slots: SlotDTO[]): CheckoutSelectionInfoDTO {
+  return {
+    note: CHECKOUT_SELECTION_NOTE,
+    deliverySlots: slots,
+    tipPresetsCents: [...CHECKOUT_TIP_PRESETS_CENTS],
+    customTipAllowed: true,
+  };
+}
 
 // ─── Narrow raw input views (read-only; consumed only by the mappers) ────────
 
@@ -618,8 +661,12 @@ function mapQuoteExpiry(totals: Record<string, unknown>): string | null {
   return null;
 }
 
-/** Map a populated pre-order `totals` envelope to the allowlisted preview DTO. */
-export function mapCheckoutPreview(totals: unknown): CheckoutPreviewDTO {
+/**
+ * Map a populated pre-order `totals` envelope to the allowlisted preview DTO.
+ * `slots` (optional) are the informational first-available delivery slots — they
+ * only ever enter through the already-allowlisted `SlotDTO` mapper, never raw.
+ */
+export function mapCheckoutPreview(totals: unknown, slots: SlotDTO[] = []): CheckoutPreviewDTO {
   const t = (totals && typeof totals === "object" ? totals : {}) as Record<string, unknown>;
   const subtotal = firstCents(t, SUBTOTAL_KEYS);
   const total = firstCents(t, TOTAL_KEYS);
@@ -634,6 +681,7 @@ export function mapCheckoutPreview(totals: unknown): CheckoutPreviewDTO {
     violations: extractViolations(t),
     quoteId: firstString(t, ["quoteId", "preOrderId"]),
     quoteExpiry: mapQuoteExpiry(t),
+    selectionInfo: buildCheckoutSelectionInfo(slots),
     message: null,
   };
 }
@@ -651,6 +699,7 @@ export function emptyCheckoutPreview(): CheckoutPreviewDTO {
     violations: [],
     quoteId: null,
     quoteExpiry: null,
+    selectionInfo: buildCheckoutSelectionInfo([]),
     message: CHECKOUT_EMPTY_CART_MESSAGE,
   };
 }
@@ -878,9 +927,12 @@ export async function getWallet(
 
 /**
  * Read-only checkout totals preview for the current populated cart. Reuses the
- * existing pre-order call (`getDeliverySlots`) UNCHANGED and surfaces only its
- * `totals` — no new request, no place-order. An empty cart (no totals) yields
- * the empty-cart preview.
+ * existing pre-order call (`getDeliverySlots`) UNCHANGED for `totals`, then adds
+ * one further read-only lookup (`first-delivery-slots`) for the informational
+ * slot examples — no place-order, no cart mutation. The slot lookup is best
+ * effort: if it fails, the totals preview still returns with `deliverySlots: []`
+ * rather than losing an otherwise-valid preview. An empty cart (no totals)
+ * yields the empty-cart preview and skips the slot lookup entirely.
  */
 export async function getCheckoutPreview(
   api: CheckersAPI = new CheckersAPI()
@@ -889,5 +941,11 @@ export async function getCheckoutPreview(
   if (!totals || typeof totals !== "object" || Object.keys(totals).length === 0) {
     return emptyCheckoutPreview();
   }
-  return mapCheckoutPreview(totals);
+  let slots: SlotDTO[] = [];
+  try {
+    slots = await getSlots(undefined, api);
+  } catch {
+    slots = [];
+  }
+  return mapCheckoutPreview(totals, slots);
 }

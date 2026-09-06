@@ -711,7 +711,9 @@ program
     `
 Read-only: this CLI never places an order. --preview surfaces the pre-order
 totals (subtotal, fee breakdown, total, minimum-order status) for the CURRENT
-populated cart. An empty cart reports "add items first".
+populated cart, plus informational delivery-slot and driver-tip examples — those
+are selected in the app when you pay and are NOT stored by this CLI. An empty
+cart reports "add items first".
 
 Examples:
   $ checkers60 checkout --preview

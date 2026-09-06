@@ -73,7 +73,10 @@ import {
   mapCheckoutPreview,
   emptyCheckoutPreview,
   getCheckoutPreview,
+  buildCheckoutSelectionInfo,
   CHECKOUT_EMPTY_CART_MESSAGE,
+  CHECKOUT_TIP_PRESETS_CENTS,
+  CHECKOUT_SELECTION_NOTE,
   resolveServiceOption,
   HYPER_DEFERRED_MESSAGE,
   DELIVERY_MODES,
@@ -741,7 +744,20 @@ const CHECKOUT_KEYS = [
   "violations",
   "quoteId",
   "quoteExpiry",
+  "selectionInfo",
   "message",
+];
+
+const SELECTION_INFO_KEYS = ["note", "deliverySlots", "tipPresetsCents", "customTipAllowed"];
+const SLOT_KEYS = [
+  "mode",
+  "storeId",
+  "from",
+  "to",
+  "available",
+  "asap",
+  "deliveryFee",
+  "minimumOrderValue",
 ];
 
 /** Route `/carts/user` + `/orders/pre-order` for a populated checkout preview. */
@@ -830,7 +846,7 @@ describe("checkout --preview surfaces pre-order totals", () => {
     expect(urls.some((u) => u.includes("/orders/pre-order"))).toBe(false);
   });
 
-  it("emptyCheckoutPreview is the fixed empty-cart shape", () => {
+  it("emptyCheckoutPreview is the fixed empty-cart shape (static selection info, no slots)", () => {
     expect(emptyCheckoutPreview()).toEqual({
       preview: true,
       populated: false,
@@ -842,6 +858,12 @@ describe("checkout --preview surfaces pre-order totals", () => {
       violations: [],
       quoteId: null,
       quoteExpiry: null,
+      selectionInfo: {
+        note: CHECKOUT_SELECTION_NOTE,
+        deliverySlots: [],
+        tipPresetsCents: [1000, 2000, 3000, 5000],
+        customTipAllowed: true,
+      },
       message: CHECKOUT_EMPTY_CART_MESSAGE,
     });
   });
@@ -851,8 +873,121 @@ describe("checkout --preview surfaces pre-order totals", () => {
     const dto = await getCheckoutPreview();
     expect(dto.populated).toBe(true);
     const urls = requestMock.mock.calls.map((c) => String(c[1]));
-    // Only cart read + pre-order — no order-submit / payment endpoint.
-    expect(urls.every((u) => u.includes("/carts/user") || u.includes("/orders/pre-order"))).toBe(true);
+    // Only cart read + pre-order + the informational slot lookup — no
+    // order-submit / payment endpoint, no cart mutation.
+    expect(
+      urls.every(
+        (u) =>
+          u.includes("/carts/user") ||
+          u.includes("/orders/pre-order") ||
+          u.includes("/first-delivery-slots")
+      )
+    ).toBe(true);
+    // The slot lookup WAS made and produced informational examples.
+    expect(urls.some((u) => u.includes("/first-delivery-slots"))).toBe(true);
+    expect(dto.selectionInfo.deliverySlots.length).toBeGreaterThan(0);
+  });
+
+  it("mapCheckoutPreview attaches allowlisted selectionInfo (slots + tip presets)", () => {
+    const slots = mapFirstDeliverySlots(
+      {
+        allowASAPDelivery: true,
+        firstAvailableSlotSixtyMin: {
+          startTime: "2026-09-05T11:00:00+02:00",
+          endTime: "2026-09-05T12:00:00+02:00",
+        },
+        firstAvailableSlotOneDay: null,
+        deliveryFeesAndMinimumOrderValues: {
+          "sixty-min-delivery": { serviceOption: "sixty-min-delivery", deliveryFee: 37, minimumOrderValue: 150 },
+        },
+      } as never,
+      [
+        {
+          storeId: "store-1",
+          serviceOptionIds: ["sixty-min-delivery"],
+          brandPriority: 0,
+          hasCapacity: [],
+          distanceFromCustomer: 0,
+        },
+      ]
+    );
+    const dto = mapCheckoutPreview(preOrderFixture.totals, slots);
+    expectKeys(dto.selectionInfo, SELECTION_INFO_KEYS);
+    expect(dto.selectionInfo.note).toBe(CHECKOUT_SELECTION_NOTE);
+    expect(dto.selectionInfo.tipPresetsCents).toEqual([1000, 2000, 3000, 5000]);
+    expect(dto.selectionInfo.customTipAllowed).toBe(true);
+    dto.selectionInfo.deliverySlots.forEach((s) => expectKeys(s, SLOT_KEYS));
+  });
+
+  it("buildCheckoutSelectionInfo copies the tip presets (exported constant stays immutable)", () => {
+    const info = buildCheckoutSelectionInfo([]);
+    expect(info.tipPresetsCents).toEqual([...CHECKOUT_TIP_PRESETS_CENTS]);
+    info.tipPresetsCents.push(9999);
+    expect([...CHECKOUT_TIP_PRESETS_CENTS]).toEqual([1000, 2000, 3000, 5000]);
+  });
+
+  it("selectionInfo drops ALL PII/secrets from a poisoned first-delivery-slots", async () => {
+    requestMock.mockImplementation((...args: unknown[]) => {
+      const url = String(args[1] ?? "");
+      if (url.includes("/carts/user")) return ok(populatedCart);
+      if (url.includes("/orders/pre-order")) return ok(preOrderFixture);
+      if (url.includes("/first-delivery-slots")) {
+        return ok({
+          allowASAPDelivery: true,
+          firstAvailableSlotSixtyMin: {
+            startTime: "2026-09-05T11:00:00+02:00",
+            endTime: "2026-09-05T12:00:00+02:00",
+            ...POISON,
+          },
+          firstAvailableSlotOneDay: null,
+          deliveryFeesAndMinimumOrderValues: {
+            "sixty-min-delivery": {
+              serviceOption: "sixty-min-delivery",
+              deliveryFee: 37,
+              minimumOrderValue: 150,
+              ...POISON,
+            },
+          },
+          ...POISON,
+        });
+      }
+      return routeRequest(...args);
+    });
+    const out = await captureStdout(() => checkoutCommand({ preview: true, json: true }));
+    const parsed = JSON.parse(out);
+    assertClean(parsed);
+    expectKeys(parsed, CHECKOUT_KEYS);
+    expectKeys(parsed.selectionInfo, SELECTION_INFO_KEYS);
+    expect(parsed.selectionInfo.deliverySlots.length).toBeGreaterThan(0);
+    parsed.selectionInfo.deliverySlots.forEach((s: object) => expectKeys(s, SLOT_KEYS));
+  });
+
+  it("a failing first-delivery-slots degrades to deliverySlots: [] (totals still returned)", async () => {
+    requestMock.mockImplementation((...args: unknown[]) => {
+      const url = String(args[1] ?? "");
+      if (url.includes("/carts/user")) return ok(populatedCart);
+      if (url.includes("/orders/pre-order")) return ok(preOrderFixture);
+      if (url.includes("/first-delivery-slots")) return Promise.reject(new Error("slot lookup failed"));
+      return routeRequest(...args);
+    });
+    const dto = await getCheckoutPreview();
+    expect(dto.populated).toBe(true);
+    expect(dto.total).toBe(22350);
+    expect(dto.selectionInfo.deliverySlots).toEqual([]);
+    expect(dto.selectionInfo.tipPresetsCents).toEqual([1000, 2000, 3000, 5000]);
+  });
+
+  it("human output shows totals AND the slot/tip selection block with the note", async () => {
+    requestMock.mockImplementation(checkoutRouter);
+    const out = await captureStdout(() => checkoutCommand({ preview: true }));
+    assertClean(out);
+    expect(out).toContain("Checkout preview");
+    expect(out).toContain("Total");
+    expect(out).toContain("Selected in the app when you pay");
+    expect(out).toContain("Driver tip (examples)");
+    expect(out).toContain("R10.00");
+    expect(out).toContain("custom");
+    expect(out).toContain(CHECKOUT_SELECTION_NOTE);
   });
 });
 
