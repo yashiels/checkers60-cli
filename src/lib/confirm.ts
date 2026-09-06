@@ -18,29 +18,38 @@ import lockfile from "proper-lockfile";
 import { CONFIG } from "./config.js";
 
 /**
- * Confirmation-bound plan artifacts for cart mutations.
+ * Confirmation-bound plan artifacts.
  *
- * Cart writes go through the captured whole-cart `/api/v3/carts/update` contract,
- * which has NO server-enforced optimistic concurrency (Oracle ruling r4, RULING B).
- * Safety therefore lives entirely here:
+ * TWO layers live here, with DIFFERENT reuse rules:
  *
- *   preview  → persist a single-use, hardened artifact holding the COMPLETE cart
- *              snapshot + the intended mutation; print the plan; exit 5.
- *   confirm  → load + hash-verify + account-bind + TTL-check the artifact, re-read
- *              live carts, refuse (exit 5) unless every cartVersion and every
- *              mutation-relevant field still matches, atomically CLAIM the artifact
- *              (single use), then let the caller build the write from the FRESH
- *              snapshot and reconcile afterwards.
+ *   1. The ARTIFACT LIFECYCLE — hardened on-disk storage (0600, O_EXCL/O_NOFOLLOW,
+ *      owner + permission checks), content-hash integrity, account-binding,
+ *      single-use atomic claim, and TTL. This layer is DOMAIN-AGNOSTIC and MAY be
+ *      reused by any future confirmation-gated write (favourites, lists, slots, …):
+ *      a caller supplies an `operation` + a domain payload and gets back a
+ *      single-use plan artifact. Favourites already ride this layer via the generic
+ *      `payload`+`preconditions` envelope.
  *
- * This is explicitly NON-atomic / last-writer-wins: a competing writer between the
- * guard read and the POST can still cause a lost update. That residual race matches
- * the app's own behavior, the domain is a reversible personal cart, and no purchase
- * is made. It MUST NOT be generalized to addresses, modes, checkout, or orders.
+ *   2. The CART SNAPSHOT / RECONCILE LOGIC (whole-cart capture, fingerprint,
+ *      per-mode reconcile) lives in cart-mutate.ts and is NOT reusable. It exists
+ *      only because the captured `/api/v3/carts/update` contract has NO
+ *      server-enforced optimistic concurrency (Oracle ruling r4, RULING B). Each
+ *      new domain MUST bring its OWN payload schema and its OWN reconcile — do not
+ *      shoehorn cart snapshot semantics onto addresses, modes, checkout, or orders.
+ *
+ * The cart flow is explicitly NON-atomic / last-writer-wins: a competing writer
+ * between the guard read and the POST can still cause a lost update. That residual
+ * race matches the app's own behavior, the domain is a reversible personal cart,
+ * and no purchase is made. This machinery MUST NEVER gate an IRREVERSIBLE action
+ * (place-order / payment): those require a real server-side contract, not this
+ * best-effort reconcile.
  */
 
 export const PLAN_SCHEMA_VERSION = 1;
 export const PLAN_CANON = "json-sorted-v1";
 export const PLAN_TTL_MS = 15 * 60 * 1000;
+/** Tolerance for a plan whose createdAt is slightly ahead of this clock. */
+const CLOCK_SKEW_MS = 60 * 1000;
 
 export type CartOperation = "cart.add" | "cart.remove" | "cart.clear";
 
@@ -158,6 +167,79 @@ export function mobileHash(mobile: string): string {
   return createHash("sha256").update(mobile).digest("hex");
 }
 
+// ── Domain shape (single-domain enforcement) ────────────────────────────────
+
+type PlanDomain = "cart" | "generic";
+
+/** Envelope keys every plan carries, regardless of domain. */
+const BASE_PLAN_KEYS = [
+  "account",
+  "canon",
+  "createdAt",
+  "expiresAt",
+  "operation",
+  "planId",
+  "schemaVersion",
+] as const;
+/** Exact key set of a cart plan (sorted). */
+const CART_PLAN_KEYS = [...BASE_PLAN_KEYS, "mutation", "snapshot"].sort();
+/** Exact key set of a generic plan (sorted). */
+const GENERIC_PLAN_KEYS = [...BASE_PLAN_KEYS, "payload", "preconditions"].sort();
+/** Exact key set of a cart / generic BODY (the domain payload the caller supplies). */
+const CART_BODY_KEYS = ["mutation", "snapshot"];
+const GENERIC_BODY_KEYS = ["payload", "preconditions"];
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+function keySetEquals(sortedKeys: string[], allowedSorted: string[]): boolean {
+  return (
+    sortedKeys.length === allowedSorted.length &&
+    sortedKeys.every((k, i) => k === allowedSorted[i])
+  );
+}
+
+/** Which domain an operation belongs to. `cart.*` ⇒ cart; everything else ⇒ generic. */
+function domainForOperation(operation: string): PlanDomain {
+  return operation.startsWith("cart.") ? "cart" : "generic";
+}
+
+/**
+ * Classify a caller-supplied body into exactly one domain, rejecting a
+ * mixed/incomplete/unknown-key shape. A cart body carries ONLY snapshot+mutation
+ * (both plain objects); a generic body carries ONLY payload+preconditions. Anything
+ * else is a {@link PlanStaleError}.
+ */
+function classifyBody(body: PlanBody): PlanDomain {
+  const record = body as Record<string, unknown>;
+  const keys = Object.keys(record)
+    .filter((k) => record[k] !== undefined)
+    .sort();
+  if (keySetEquals(keys, CART_BODY_KEYS)) {
+    if (!isPlainObject(body.snapshot) || !isPlainObject(body.mutation)) {
+      throw new PlanStaleError("Cart plan body has an invalid snapshot/mutation.");
+    }
+    return "cart";
+  }
+  if (keySetEquals(keys, GENERIC_BODY_KEYS)) {
+    if (!isPlainObject(body.payload) || !isPlainObject(body.preconditions)) {
+      throw new PlanStaleError("Generic plan body has an invalid payload/preconditions.");
+    }
+    return "generic";
+  }
+  throw new PlanStaleError("Plan body must be exactly one domain shape (cart or generic).");
+}
+
+/** Clamp a caller-supplied max-age to (0, PLAN_TTL_MS]; undefined → the full TTL. */
+function clampTtl(maxAgeMs?: number): number {
+  if (maxAgeMs === undefined) return PLAN_TTL_MS;
+  if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) {
+    throw new PlanStaleError("Invalid plan max-age. Refusing.");
+  }
+  return Math.min(maxAgeMs, PLAN_TTL_MS);
+}
+
 // ── Artifact storage ────────────────────────────────────────────────────────
 
 export function plansDir(): string {
@@ -237,7 +319,19 @@ function sweep(dir: string): void {
  * Build, hash, and atomically persist a plan artifact (0600, no-overwrite).
  * Returns the finished plan (with planId/timestamps).
  */
-export function writePlan(account: PlanAccount, operation: string, body: PlanBody): Plan {
+export function writePlan(
+  account: PlanAccount,
+  operation: string,
+  body: PlanBody,
+  opts: { maxAgeMs?: number } = {}
+): Plan {
+  // Reject a mixed/incomplete domain shape BEFORE anything is persisted, and bind
+  // the payload domain to the operation (a cart.* op can never carry a generic
+  // payload, and vice versa).
+  if (classifyBody(body) !== domainForOperation(operation)) {
+    throw new PlanStaleError("Plan operation does not match its payload domain.");
+  }
+
   const dir = ensureDir();
   sweep(dir);
 
@@ -247,7 +341,8 @@ export function writePlan(account: PlanAccount, operation: string, body: PlanBod
   }
 
   // Timestamps are part of the hashed identity, so the planId, the stored expiry,
-  // and the displayed expiry can never disagree.
+  // and the displayed expiry can never disagree. A caller may pin the plan to a
+  // shorter life (e.g. below a slot token's expiry), but never longer than the TTL.
   const now = Date.now();
   const core: PlanCore = {
     schemaVersion: PLAN_SCHEMA_VERSION,
@@ -259,7 +354,7 @@ export function writePlan(account: PlanAccount, operation: string, body: PlanBod
     payload: body.payload,
     preconditions: body.preconditions,
     createdAt: now,
-    expiresAt: now + PLAN_TTL_MS,
+    expiresAt: now + clampTtl(opts.maxAgeMs),
   };
   const planId = computePlanId(core);
   const plan: Plan = { ...core, planId };
@@ -274,7 +369,7 @@ export function writePlan(account: PlanAccount, operation: string, body: PlanBod
     if ((err as NodeJS.ErrnoException).code === "EEXIST") {
       // Astronomically unlikely now that timestamps are hashed, but never return an
       // unstored plan: load and return the artifact that actually exists on disk.
-      return loadPlan(planId, account);
+      return loadPlan(planId, account, operation);
     }
     throw err;
   }
@@ -290,7 +385,11 @@ export function writePlan(account: PlanAccount, operation: string, body: PlanBod
  * Load + fully validate an artifact for `--confirm`. Any failure is a
  * {@link PlanStaleError} ("re-run preview") — never a silent proceed.
  */
-export function loadPlan(planId: string, account: PlanAccount): Plan {
+export function loadPlan(
+  planId: string,
+  account: PlanAccount,
+  expectedOperation: string
+): Plan {
   if (!/^sha256:[a-f0-9]{64}$/.test(planId)) {
     throw new PlanStaleError("Invalid plan id. Run the preview again.");
   }
@@ -330,11 +429,24 @@ export function loadPlan(planId: string, account: PlanAccount): Plan {
     throw new PlanStaleError("Plan artifact is corrupt. Run the preview again.");
   }
 
+  if (!isPlainObject(plan)) {
+    throw new PlanStaleError("Plan artifact has an invalid shape. Run the preview again.");
+  }
+
+  // Exact-key-set enforcement: the top-level keys must be EXACTLY a cart plan's or
+  // EXACTLY a generic plan's — no more, no less. This rejects unknown/injected
+  // top-level fields (which would otherwise be trusted but omitted from the hash)
+  // AND any mixed or incomplete domain shape in one check.
+  const topKeys = Object.keys(plan).sort();
+  const isCart = keySetEquals(topKeys, CART_PLAN_KEYS);
+  const isGeneric = keySetEquals(topKeys, GENERIC_PLAN_KEYS);
+  if (!isCart && !isGeneric) {
+    throw new PlanStaleError("Plan artifact has an unexpected shape. Run the preview again.");
+  }
+
   // Runtime envelope validation BEFORE any nested access — a hand-crafted or
   // corrupt file must never reach domain logic with the wrong shape.
   const okEnvelope =
-    plan !== null &&
-    typeof plan === "object" &&
     typeof plan.schemaVersion === "number" &&
     typeof plan.canon === "string" &&
     typeof plan.operation === "string" &&
@@ -348,6 +460,19 @@ export function loadPlan(planId: string, account: PlanAccount): Plan {
     typeof plan.account.mobileHash === "string";
   if (!okEnvelope) {
     throw new PlanStaleError("Plan artifact has an invalid shape. Run the preview again.");
+  }
+
+  // Domain payload must be well-typed objects, matching the discriminated key set,
+  // AND the domain must match the operation (no cart op with a generic payload).
+  if (isCart) {
+    if (!isPlainObject(plan.snapshot) || !isPlainObject(plan.mutation)) {
+      throw new PlanStaleError("Plan artifact has an invalid cart payload. Run the preview again.");
+    }
+  } else if (!isPlainObject(plan.payload) || !isPlainObject(plan.preconditions)) {
+    throw new PlanStaleError("Plan artifact has an invalid payload. Run the preview again.");
+  }
+  if ((isCart ? "cart" : "generic") !== domainForOperation(plan.operation)) {
+    throw new PlanStaleError("Plan operation does not match its payload domain. Run the preview again.");
   }
 
   if (plan.schemaVersion !== PLAN_SCHEMA_VERSION || plan.canon !== PLAN_CANON) {
@@ -369,15 +494,37 @@ export function loadPlan(planId: string, account: PlanAccount): Plan {
   if (recomputed !== plan.planId || plan.planId !== planId) {
     throw new PlanStaleError("Plan artifact failed integrity verification. Run the preview again.");
   }
-  if (typeof plan.expiresAt !== "number" || plan.expiresAt < Date.now()) {
+  // Timestamp ordering/bounds against a single captured `now`: finite, well-ordered,
+  // not created in the future (beyond a small clock-skew tolerance — which would let
+  // a forged plan outlive the TTL), and never claiming a life longer than the ceiling.
+  const now = Date.now();
+  if (
+    !Number.isFinite(plan.createdAt) ||
+    !Number.isFinite(plan.expiresAt) ||
+    plan.createdAt <= 0 ||
+    plan.createdAt > now + CLOCK_SKEW_MS ||
+    plan.createdAt > plan.expiresAt ||
+    plan.expiresAt - plan.createdAt > PLAN_TTL_MS
+  ) {
+    throw new PlanStaleError("Plan has invalid timestamps. Run the preview again.");
+  }
+  if (plan.expiresAt < now) {
     throw new PlanStaleError("Plan has expired. Run the preview again.");
   }
+  // Account binding is checked before the operation mismatch so a plan that isn't
+  // yours never reveals which operation it was for.
   if (
     plan.account.userId !== account.userId ||
     plan.account.uuid !== account.uuid ||
     plan.account.mobileHash !== account.mobileHash
   ) {
     throw new PlanStaleError("Plan belongs to a different account. Refusing.");
+  }
+  // A plan for one operation must never be consumed by another command.
+  if (plan.operation !== expectedOperation) {
+    throw new PlanStaleError(
+      `Plan is for ${plan.operation}, not ${expectedOperation}. Run the preview again.`
+    );
   }
   return plan;
 }

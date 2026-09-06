@@ -413,12 +413,7 @@ export async function runCartMutation(
   }
 
   // ── Confirm: load + verify artifact, re-read, guard, claim, dispatch, reconcile ──
-  const plan = loadPlan(options.confirm, acct);
-  if (plan.operation !== operation) {
-    throw new PlanStaleError(
-      `Plan is for ${plan.operation}, not ${operation}. Run the preview again.`
-    );
-  }
+  const plan = loadPlan(options.confirm, acct, operation);
   if (plan.schemaVersion !== PLAN_SCHEMA_VERSION || plan.canon !== PLAN_CANON) {
     throw new PlanStaleError("Plan is from an incompatible version. Run the preview again.");
   }
@@ -427,6 +422,9 @@ export async function runCartMutation(
   }
   const planSnapshot = plan.snapshot;
   const planMutation = plan.mutation;
+  if (planMutation.operation !== operation) {
+    throw new PlanStaleError("Plan mutation does not match the requested operation. Run the preview again.");
+  }
 
   const release = await acquireConfirmLock(acct);
   try {

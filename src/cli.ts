@@ -122,6 +122,11 @@ Exit codes:
   2  invalid usage
   3  authentication (not logged in / 401 / 403)
   4  network (timeout, DNS, connection reset)
+  5  confirmation required / plan stale (re-run the preview, then --confirm)
+  6  outcome unknown/divergent after a dispatched write (reconcile manually)
+
+A future "unsupported" capability (an action this CLI cannot safely perform) is
+reported distinctly as invalid usage (exit 2) — it makes no network call.
 `
 );
 

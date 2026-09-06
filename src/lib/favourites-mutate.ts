@@ -143,10 +143,7 @@ export async function runFavMutation(
   }
 
   // ── Confirm ──
-  const plan = loadPlan(options.confirm, acct);
-  if (plan.operation !== operation) {
-    throw new PlanStaleError(`Plan is for ${plan.operation}, not ${operation}. Run the preview again.`);
-  }
+  const plan = loadPlan(options.confirm, acct, operation);
   if (plan.schemaVersion !== PLAN_SCHEMA_VERSION || plan.canon !== PLAN_CANON) {
     throw new PlanStaleError("Plan is from an incompatible version. Run the preview again.");
   }
