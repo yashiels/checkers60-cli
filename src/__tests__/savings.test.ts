@@ -27,11 +27,14 @@ vi.mock("../lib/credentials.js", async (importOriginal) => {
 });
 
 import {
+  dedupeMissedDeals,
   getCartSavings,
   isDealActive,
   mapCartDeal,
   mapCartSavings,
+  mapMissedDeal,
   SAVINGS_EMPTY_CART_MESSAGE,
+  type MissedDealDTO,
 } from "../lib/orders.js";
 import { normalizeBonusBuy } from "../lib/promotions.js";
 import { mapCatalogProduct, type RawCatalogProduct } from "../lib/api.js";
@@ -173,6 +176,57 @@ const PRODUCTS: Record<string, Record<string, unknown>> = {
   },
 };
 
+// ── Synthetic missedDiscounts ("complete your deal"), each poisoned ────────
+// Includes a discountValue:0 case, a duplicate promotionId (deduped away), and
+// an entry with NO promotionId + NO name (null projections, preserved).
+const MISSED_DISCOUNTS: Record<string, unknown>[] = [
+  {
+    code: "MD-1",
+    id: "MDID-1",
+    promotionId: "PROMO-1",
+    name: "Buy 2 For R89",
+    shortDescription: "Buy 2 For R89",
+    longDescription: "Buy 2 Eskort Wood Smoked Rindless Streaky Bacon 200g For R89",
+    discountType: { code: "other", id: "dt1", name: "Other" },
+    memberType: { code: "fox_members", id: "mt1", name: "Xtra Savings" },
+    offerType: { code: "untranslated", id: "ot1", name: "Untranslated" },
+    discountValue: 0,
+    ...POISON,
+  },
+  {
+    code: "MD-2",
+    id: "MDID-2",
+    promotionId: "PROMO-2",
+    name: "Buy 3 & Save 15%",
+    shortDescription: "Buy 3 & Save 15%",
+    longDescription: "Buy Any 3 Selected Gadgets And Save 15%",
+    discountType: { code: "percentage", id: "dt2", name: "Percentage" },
+    memberType: { code: "all_customers", id: "mt2", name: "All" },
+    offerType: { code: "untranslated" },
+    discountValue: 0,
+    ...POISON,
+  },
+  // Duplicate promotionId → dropped by the dedup (first occurrence kept).
+  {
+    promotionId: "PROMO-1",
+    name: "Buy 2 For R89 (duplicate)",
+    shortDescription: "duplicate",
+    longDescription: "duplicate",
+    discountType: { code: "other" },
+    memberType: { code: "fox_members" },
+    discountValue: 0,
+    ...POISON,
+  },
+  // No promotionId and no name → both project to null; entry is preserved.
+  {
+    shortDescription: "Mystery deal",
+    longDescription: "Add a qualifying item to complete",
+    discountType: { code: "other" },
+    memberType: {},
+    ...POISON,
+  },
+];
+
 const ok = (data: unknown) =>
   Promise.resolve({ status: 200, headers: new Headers(), data });
 
@@ -204,6 +258,9 @@ function router(...args: unknown[]) {
     json?: { filter?: { productListSource?: { productIds?: string[] } } };
   };
   if (url.includes("/carts/user")) return cartResponse();
+  if (url.includes("/update-promotions")) {
+    return ok({ missedDiscounts: MISSED_DISCOUNTS, ...POISON });
+  }
   if (url.includes("/products/filter")) {
     const ids = opts.json?.filter?.productListSource?.productIds ?? [];
     return ok({
@@ -252,8 +309,16 @@ async function captureStdout(fn: () => Promise<void>): Promise<string> {
   return out;
 }
 
-const SAVINGS_KEYS = ["cartItemCount", "cartSavings", "deals", "message"];
+const SAVINGS_KEYS = ["cartItemCount", "cartSavings", "deals", "missedDeals", "message"];
 const CART_SAVINGS_KEYS = ["productSavings", "discountCodesSavings", "totalSavings"];
+const MISSED_DEAL_KEYS = [
+  "promotionId",
+  "name",
+  "shortDescription",
+  "longDescription",
+  "membersOnly",
+  "discountTypeCode",
+];
 const DEAL_KEYS = [
   "dealId",
   "title",
@@ -416,6 +481,58 @@ describe("mapCartSavings", () => {
   });
 });
 
+// ── mapMissedDeal / dedupeMissedDeals (verbatim, no fabricated saving) ────
+describe("mapMissedDeal", () => {
+  it("copies EXACTLY the allowlisted keys, drops discountValue + PII", () => {
+    const dto = mapMissedDeal(MISSED_DISCOUNTS[0] as never);
+    assertClean(dto);
+    assertNoFabrication(dto);
+    expectKeys(dto, MISSED_DEAL_KEYS);
+    expect(dto).toEqual({
+      promotionId: "PROMO-1",
+      name: "Buy 2 For R89",
+      shortDescription: "Buy 2 For R89",
+      longDescription: "Buy 2 Eskort Wood Smoked Rindless Streaky Bacon 200g For R89",
+      membersOnly: true,
+      discountTypeCode: "other",
+    });
+  });
+  it("projects missing name/promotionId/discountType to null and membersOnly false", () => {
+    const dto = mapMissedDeal({ shortDescription: "x" } as never);
+    expect(dto).toEqual({
+      promotionId: null,
+      name: null,
+      shortDescription: "x",
+      longDescription: null,
+      membersOnly: false,
+      discountTypeCode: null,
+    });
+  });
+  it("never surfaces discountValue even when non-zero", () => {
+    const dto = mapMissedDeal({ promotionId: "P", discountValue: 999 } as never);
+    expect(JSON.stringify(dto)).not.toContain("999");
+    expect(JSON.stringify(dto)).not.toContain("discountValue");
+  });
+});
+
+describe("dedupeMissedDeals", () => {
+  it("de-dupes by promotionId (keeps first), preserves null-id entries", () => {
+    const a: MissedDealDTO = { promotionId: "P1", name: "a", shortDescription: null, longDescription: null, membersOnly: false, discountTypeCode: null };
+    const aDup: MissedDealDTO = { ...a, name: "a-dup" };
+    const b: MissedDealDTO = { ...a, promotionId: "P2", name: "b" };
+    const n1: MissedDealDTO = { ...a, promotionId: null, name: "n1" };
+    const n2: MissedDealDTO = { ...a, promotionId: null, name: "n2" };
+    const out = dedupeMissedDeals([a, aDup, b, n1, n2]);
+    expect(out.map((d) => d.name)).toEqual(["a", "b", "n1", "n2"]);
+  });
+  it("treats an empty-string promotionId as no-id (preserved, not collapsed)", () => {
+    const base: MissedDealDTO = { promotionId: "", name: "e1", shortDescription: null, longDescription: null, membersOnly: false, discountTypeCode: null };
+    const e2: MissedDealDTO = { ...base, name: "e2" };
+    const out = dedupeMissedDeals([base, e2]);
+    expect(out.map((d) => d.name)).toEqual(["e1", "e2"]);
+  });
+});
+
 // ── getCartSavings orchestration ─────────────────────────────────────────
 describe("getCartSavings", () => {
   it("surfaces only active, cart-touched deals with clean allowlisted keys", async () => {
@@ -446,21 +563,63 @@ describe("getCartSavings", () => {
     expect(byArticle!.qualifyingItemsInCart.map((i) => i.productId)).toEqual(["PROD-CART-2"]);
   });
 
-  it("empty cart → guidance message, no deals, no product lookup", async () => {
+  it("empty cart → guidance message, no deals, no product/promotion lookup", async () => {
     emptyCart = true;
     const dto = await getCartSavings(undefined, IN_WINDOW);
     expectKeys(dto, SAVINGS_KEYS);
-    expect(dto).toEqual({ cartItemCount: 0, cartSavings: null, deals: [], message: SAVINGS_EMPTY_CART_MESSAGE });
+    expect(dto).toEqual({ cartItemCount: 0, cartSavings: null, deals: [], missedDeals: [], message: SAVINGS_EMPTY_CART_MESSAGE });
     const urls = requestMock.mock.calls.map((c) => String(c[1]));
     expect(urls.some((u) => u.includes("/products/filter"))).toBe(false);
+    expect(urls.some((u) => u.includes("/update-promotions"))).toBe(false);
   });
 
-  it("is read-only: only cart-read + catalog filter, no order/cart write", async () => {
+  it("is read-only: only cart-read + catalog filter + promotion recompute, no write", async () => {
     await getCartSavings(undefined, IN_WINDOW);
     const urls = requestMock.mock.calls.map((c) => String(c[1]));
     expect(
-      urls.every((u) => u.includes("/carts/user") || u.includes("/products/filter"))
+      urls.every(
+        (u) =>
+          u.includes("/carts/user") ||
+          u.includes("/products/filter") ||
+          u.includes("/update-promotions")
+      )
     ).toBe(true);
+  });
+
+  it("surfaces the server missedDiscounts verbatim, deduped, poison-free", async () => {
+    const dto = await getCartSavings(undefined, IN_WINDOW);
+    assertClean(dto);
+    assertNoFabrication(dto);
+    dto.missedDeals.forEach((d) => expectKeys(d, MISSED_DEAL_KEYS));
+    // PROMO-1 (first) + PROMO-2 + the null-id entry; the duplicate PROMO-1 is dropped.
+    expect(dto.missedDeals.map((d) => d.promotionId)).toEqual(["PROMO-1", "PROMO-2", null]);
+    expect(dto.missedDeals[0]).toEqual({
+      promotionId: "PROMO-1",
+      name: "Buy 2 For R89",
+      shortDescription: "Buy 2 For R89",
+      longDescription: "Buy 2 Eskort Wood Smoked Rindless Streaky Bacon 200g For R89",
+      membersOnly: true,
+      discountTypeCode: "other",
+    });
+    expect(dto.missedDeals[1].membersOnly).toBe(false);
+    // Missing name/promotionId project to null; nothing is fabricated.
+    expect(dto.missedDeals[2]).toEqual({
+      promotionId: null,
+      name: null,
+      shortDescription: "Mystery deal",
+      longDescription: "Add a qualifying item to complete",
+      membersOnly: false,
+      discountTypeCode: "other",
+    });
+  });
+
+  it("requests update-promotions for the primary cart id, retry:never", async () => {
+    await getCartSavings(undefined, IN_WINDOW);
+    const call = requestMock.mock.calls.find((c) => String(c[1]).includes("/update-promotions"));
+    expect(call).toBeTruthy();
+    expect(String(call![1])).toContain("/carts/cart-1/update-promotions");
+    expect(String(call![0])).toBe("POST");
+    expect((call![2] as { retry?: string }).retry).toBe("never");
   });
 });
 
@@ -479,12 +638,25 @@ describe("savings command --json is clean end-to-end", () => {
         expectKeys(i, ITEM_KEYS)
       );
     });
+    expect(parsed.missedDeals.length).toBeGreaterThan(0);
+    parsed.missedDeals.forEach((d: object) => expectKeys(d, MISSED_DEAL_KEYS));
+  });
+
+  it("human (table) output is poison-free, fabrication-free, and shows the deal", async () => {
+    const out = await captureStdout(() => savingsCommand({ json: false }));
+    for (const bad of FORBIDDEN) expect(out).not.toContain(bad);
+    expect(out).not.toMatch(/\b\d+\s*of\s*\d+\b/i);
+    expect(out.toLowerCase()).not.toContain("required");
+    expect(out).toContain("Complete your deal");
+    expect(out).toContain("Buy 2 For R89");
+    // The long description (where the buy-quantity & saving live) is shown verbatim.
+    expect(out).toContain("Buy 2 Eskort Wood Smoked Rindless Streaky Bacon 200g For R89");
   });
 
   it("empty cart --json emits the guidance message", async () => {
     emptyCart = true;
     const out = await captureStdout(() => savingsCommand({ json: true }));
     const parsed = JSON.parse(out);
-    expect(parsed).toEqual({ cartItemCount: 0, cartSavings: null, deals: [], message: SAVINGS_EMPTY_CART_MESSAGE });
+    expect(parsed).toEqual({ cartItemCount: 0, cartSavings: null, deals: [], missedDeals: [], message: SAVINGS_EMPTY_CART_MESSAGE });
   });
 });

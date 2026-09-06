@@ -1,5 +1,10 @@
 import chalk from "chalk";
-import { getCartSavings, type CartDealDTO, type SavingsDTO } from "../lib/orders.js";
+import {
+  getCartSavings,
+  type CartDealDTO,
+  type MissedDealDTO,
+  type SavingsDTO,
+} from "../lib/orders.js";
 import { formatRand } from "../lib/format.js";
 import { startSpinner } from "../lib/output.js";
 
@@ -36,16 +41,54 @@ export async function savings(options: SavingsOptions = {}): Promise<void> {
     process.stdout.write(
       `${chalk.dim("No bonus-buy deals apply to items in your cart.")}\n`
     );
-    return;
+  } else {
+    process.stdout.write(
+      `${chalk.bold(`🏷  Bonus-buy deals your cart touches (${dto.deals.length})`)}\n`
+    );
+    for (const deal of dto.deals) printDeal(deal);
+    process.stdout.write(
+      `\n${chalk.dim("  Terms (buy-quantity & saving) live in each deal's description.")}\n` +
+        `${chalk.dim("  Eligible options are hints — add them via ")}${chalk.cyan("checkers60 add")}${chalk.dim(".")}\n`
+    );
   }
 
+  printMissedDeals(dto.missedDeals);
+  process.stdout.write("\n");
+}
+
+/**
+ * Print the server's "complete your deal" list — deals the cart could complete
+ * by adding qualifying items. A HINT only: the buy-quantity and saving live in
+ * each deal's own description, so this never states a threshold, a saving, or
+ * that a deal is "required".
+ */
+function printMissedDeals(missed: MissedDealDTO[]): void {
+  if (missed.length === 0) {
+    process.stdout.write(`\n${chalk.dim("No deals to complete right now.")}\n`);
+    return;
+  }
+  process.stdout.write(`\n${chalk.bold(`🎯 Complete your deal (${missed.length})`)}\n`);
+  for (const deal of missed) {
+    const heading = deal.name ?? deal.shortDescription ?? deal.promotionId ?? "Deal";
+    process.stdout.write(`\n  ${chalk.bold(heading)}`);
+    if (deal.membersOnly) process.stdout.write(` ${chalk.cyan("[Xtra Savings]")}`);
+    process.stdout.write("\n");
+    if (deal.shortDescription && deal.shortDescription !== heading) {
+      process.stdout.write(`    ${chalk.dim(deal.shortDescription)}\n`);
+    }
+    // The buy-quantity and saving live verbatim in the long description — print it.
+    if (
+      deal.longDescription &&
+      deal.longDescription !== heading &&
+      deal.longDescription !== deal.shortDescription
+    ) {
+      process.stdout.write(`    ${chalk.dim(deal.longDescription)}\n`);
+    }
+  }
   process.stdout.write(
-    `${chalk.bold(`🏷  Bonus-buy deals your cart touches (${dto.deals.length})`)}\n`
-  );
-  for (const deal of dto.deals) printDeal(deal);
-  process.stdout.write(
-    `\n${chalk.dim("  Terms (buy-quantity & saving) live in each deal's description.")}\n` +
-      `${chalk.dim("  Eligible options are hints — add them via ")}${chalk.cyan("checkers60 add")}${chalk.dim(".")}\n\n`
+    `\n${chalk.dim("  Deals you could complete — add the qualifying items via ")}` +
+      `${chalk.cyan("checkers60 add")}${chalk.dim(".")}\n` +
+      `${chalk.dim("  Each deal's terms live in its own description.")}\n`
   );
 }
 

@@ -8,6 +8,7 @@ import {
   type RawCompletedOrder,
   type RawCustomerProfile,
   type RawFirstDeliverySlots,
+  type RawMissedDiscount,
   type RawOrderItem,
   type RawUserProductScore,
 } from "./api.js";
@@ -393,15 +394,35 @@ export interface CartSavingsDTO {
 }
 
 /**
+ * One server-provided "complete your deal" (missedDiscounts) entry — the app's
+ * MissedDiscountSection. Surfaced VERBATIM: EXACTLY these six fields, each copied
+ * from the raw entry (or `null`), plus `membersOnly` as a direct boolean
+ * projection of `memberType.code`. `discountValue` is deliberately NOT mapped
+ * (it is 0/untrustworthy for these deals), so no fabricated saving can escape;
+ * the buy-quantity and rand-saving live only inside the description text.
+ */
+export interface MissedDealDTO {
+  promotionId: string | null;
+  name: string | null;
+  shortDescription: string | null;
+  longDescription: string | null;
+  /** Direct projection of `memberType.code === 'fox_members'` — not a saving. */
+  membersOnly: boolean;
+  discountTypeCode: string | null;
+}
+
+/**
  * `savings` output: the deals the current cart touches. `cartItemCount` is the
  * number of distinct cart lines. `cartSavings` is the server's verbatim
- * already-applied cart savings (null when the cart reports none). `message`
- * guides the empty-cart case only.
+ * already-applied cart savings (null when the cart reports none). `missedDeals`
+ * is the server's authoritative "complete your deal" list for the current cart
+ * (empty when none). `message` guides the empty-cart case only.
  */
 export interface SavingsDTO {
   cartItemCount: number;
   cartSavings: CartSavingsDTO | null;
   deals: CartDealDTO[];
+  missedDeals: MissedDealDTO[];
   message: string | null;
 }
 
@@ -1169,6 +1190,42 @@ export function mapCartDeal(
   };
 }
 
+/**
+ * Map one raw `missedDiscounts` entry to the allowlisted {@link MissedDealDTO},
+ * field-by-field. Every string is copied only when it is genuinely a string
+ * (else null); `discountValue` and every unknown/PII field are dropped. Nothing
+ * is computed — the buy-quantity/saving stay inside the human description text.
+ */
+export function mapMissedDeal(raw: RawMissedDiscount): MissedDealDTO {
+  return {
+    promotionId: typeof raw.promotionId === "string" ? raw.promotionId : null,
+    name: typeof raw.name === "string" ? raw.name : null,
+    shortDescription: typeof raw.shortDescription === "string" ? raw.shortDescription : null,
+    longDescription: typeof raw.longDescription === "string" ? raw.longDescription : null,
+    membersOnly: raw.memberType?.code === "fox_members",
+    discountTypeCode: typeof raw.discountType?.code === "string" ? raw.discountType.code : null,
+  };
+}
+
+/**
+ * De-duplicate missed deals by a non-empty `promotionId`, keeping the first
+ * occurrence in order. Entries with no usable id (null or empty string) are
+ * conservatively preserved individually — collapsing them by a shared empty key
+ * could drop distinct deals.
+ */
+export function dedupeMissedDeals(deals: MissedDealDTO[]): MissedDealDTO[] {
+  const seen = new Set<string>();
+  const out: MissedDealDTO[] = [];
+  for (const d of deals) {
+    if (d.promotionId) {
+      if (seen.has(d.promotionId)) continue;
+      seen.add(d.promotionId);
+    }
+    out.push(d);
+  }
+  return out;
+}
+
 /** Split a list into fixed-size chunks (in order). */
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -1194,6 +1251,7 @@ export async function getCartSavings(
       cartItemCount: 0,
       cartSavings: null,
       deals: [],
+      missedDeals: [],
       message: SAVINGS_EMPTY_CART_MESSAGE,
     };
   }
@@ -1221,10 +1279,14 @@ export async function getCartSavings(
     if (qualifying.length > 0) cartDeals.push(mapCartDeal(deal, qualifying, names));
   }
 
+  const rawMissed = await api.getCartMissedDiscounts(state.cartId ?? "");
+  const missedDeals = dedupeMissedDeals(rawMissed.map(mapMissedDeal));
+
   return {
     cartItemCount: lines.length,
     cartSavings: mapCartSavings(state.cartSavings),
     deals: cartDeals,
+    missedDeals,
     message: null,
   };
 }

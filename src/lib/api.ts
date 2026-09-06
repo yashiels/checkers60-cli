@@ -274,6 +274,28 @@ export interface RawCard {
   mostRecentlyUsed?: boolean;
 }
 
+/**
+ * One "complete your deal" entry (the app's MissedDiscountSection) returned in
+ * the `missedDiscounts` array of an `update-promotions` response — a deal the
+ * cart is close to but has NOT unlocked. `discountValue` is often 0 for these
+ * (the complex `other` discount type); the buy-quantity and rand-saving live
+ * ONLY in the human description text. orders.ts maps an allowlisted DTO and
+ * deliberately drops `discountValue` so no fabricated saving can escape.
+ */
+export interface RawMissedDiscount {
+  code?: string;
+  id?: string;
+  promotionId?: string;
+  name?: string;
+  shortDescription?: string;
+  longDescription?: string;
+  discountType?: { code?: string; id?: string; name?: string };
+  memberType?: { code?: string; id?: string; name?: string };
+  offerType?: { code?: string; id?: string; name?: string };
+  discountValue?: number;
+  [key: string]: unknown;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Generate a MongoDB-style ObjectId (matches the app's line-item ids). */
@@ -695,6 +717,31 @@ export class CheckersAPI {
       `${CONFIG.ORDERS_API}/api/v1/carts/${encodeURIComponent(cartId)}`,
       { headers, retry: "never" }
     );
+  }
+
+  /**
+   * The cart's "complete your deal" list — the server's authoritative
+   * `missedDiscounts`, obtained the way the app does: POST `update-promotions`
+   * for the given cart (body = store contexts). `retry:"never"`: despite the
+   * read intent, this is a promotion-recompute POST, not a provably
+   * side-effect-free read, so it must never be auto-retried. Raw; orders.ts maps
+   * an allowlisted DTO and drops the untrustworthy `discountValue`. A missing/
+   * empty field → []. An absent cart id is a no-op ([]) rather than a bad request.
+   */
+  async getCartMissedDiscounts(
+    cartId: string,
+    stores?: StoreContext[]
+  ): Promise<RawMissedDiscount[]> {
+    if (!cartId) return [];
+    const headers = await this.headers(stores);
+    const storeContexts = stores ?? CONFIG.DEFAULT_STORES;
+    const res = await request<{ missedDiscounts?: RawMissedDiscount[] }>(
+      "POST",
+      `${CONFIG.ORDERS_API}/api/v1/carts/${encodeURIComponent(cartId)}/update-promotions?include_v2_replacement_preferences=true&useProductMinInfoAnnotation=true`,
+      { headers, json: { storeContexts }, retry: "never" }
+    );
+    const missed = res.data?.missedDiscounts;
+    return Array.isArray(missed) ? missed : [];
   }
 
   // ── Addresses & cards (auth.sixty60.co.za) ──────────────────────────────
