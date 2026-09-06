@@ -792,17 +792,20 @@ export class CheckersAPI {
 
   /**
    * Saved payment cards. Captured contract: `GET {AUTH}/customers/{userId}/cards`
-   * with the Bearer SESSION token (the session token is in the header, not the
-   * path — so no sensitivePathTail/redirect handling). Returns the raw cards;
-   * orders.ts maps only the allowlisted issuer/masked/expiry/default fields —
-   * token/cardholderName never escape. `retry:"safe"` (a plain read).
+   * with the Bearer SESSION token. The auth host requires the FULL identity header
+   * set (customer-id, userid, storeids, istio-*, channel-os) — the minimal header
+   * set returned 401; sending the same identity headers the orders-api calls use
+   * (via {@link headers}) returns 200 (verified against the live app's own cards
+   * request). Returns the raw cards; orders.ts maps only the allowlisted
+   * issuer/masked/expiry/default fields — token/cardholderName never escape.
+   * `retry:"safe"` (a plain read).
    */
   async getCards(): Promise<RawCard[]> {
     const session = await this.session();
     const res = await request<{ cards?: RawCard[]; success?: boolean }>(
       "GET",
       `${CONFIG.AUTH_BASE}/customers/${encodeURIComponent(session.userId)}/cards`,
-      { headers: this.authHostHeaders(session), retry: "safe" }
+      { headers: await this.headers(), retry: "safe" }
     );
     return res.data?.cards ?? [];
   }
@@ -811,17 +814,6 @@ export class CheckersAPI {
   private profileHeaders(): Record<string, string> {
     return {
       authorization: `Bearer ${CONFIG.PROFILE_TOKEN}`,
-      channel: CONFIG.CHANNEL,
-      "app-version": CONFIG.APP_VERSION,
-      appversion: CONFIG.APP_VERSION_CODE,
-      "device-id": getDeviceId(),
-    };
-  }
-
-  /** Auth-host header set: Bearer SESSION token + base app headers (cards read). */
-  private authHostHeaders(session: SessionContext): Record<string, string> {
-    return {
-      authorization: `Bearer ${session.sessionToken}`,
       channel: CONFIG.CHANNEL,
       "app-version": CONFIG.APP_VERSION,
       appversion: CONFIG.APP_VERSION_CODE,
