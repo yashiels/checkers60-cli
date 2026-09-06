@@ -71,36 +71,33 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build macOS arm64 binary
-        run: bun build --compile src/cli.ts --outfile checkers60
-
-      - name: Build Linux x64 binary
-        run: |
-          bun build --compile --target=bun-linux-x64 src/cli.ts --outfile checkers60-linux-x64
-          mv checkers60-linux-x64 checkers60-linux
-
-      - name: Create tarballs
+      - name: Build binaries (amd64 + arm64, macOS + Linux) + tarballs
         id: tarballs
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+          # Bake the version into each standalone binary (they can't read package.json
+          # at runtime). Value is a JS string literal for bun --define.
+          VDEF=$(printf '__CHECKERS60_VERSION__="%s"' "$VERSION")
 
-          # macOS arm64
-          MACOS_TAR="checkers60-v${VERSION}-darwin-arm64.tar.gz"
-          tar -czf "$MACOS_TAR" checkers60
-          MACOS_SHA=$(shasum -a 256 "$MACOS_TAR" | awk '{print $1}')
+          # <bun-target> <artifact-suffix> — build, tarball, sha, emit outputs.
+          build() {
+            local target="$1" suffix="$2"
+            bun build --compile --target="$target" --define "$VDEF" src/cli.ts --outfile checkers60
+            local tar="checkers60-v${VERSION}-${suffix}.tar.gz"
+            tar -czf "$tar" checkers60
+            rm -f checkers60
+            local sha
+            sha=$(shasum -a 256 "$tar" | awk '{print $1}')
+            local key="${suffix//-/_}"
+            echo "${key}_tar=${tar}" >> "$GITHUB_OUTPUT"
+            echo "${key}_sha=${sha}" >> "$GITHUB_OUTPUT"
+            echo "${suffix}: ${sha}  (${tar})"
+          }
 
-          # Linux x64
-          LINUX_TAR="checkers60-v${VERSION}-linux-x64.tar.gz"
-          mv checkers60-linux checkers60
-          tar -czf "$LINUX_TAR" checkers60
-          LINUX_SHA=$(shasum -a 256 "$LINUX_TAR" | awk '{print $1}')
-
-          echo "macos_tar=${MACOS_TAR}" >> "$GITHUB_OUTPUT"
-          echo "macos_sha=${MACOS_SHA}" >> "$GITHUB_OUTPUT"
-          echo "linux_tar=${LINUX_TAR}" >> "$GITHUB_OUTPUT"
-          echo "linux_sha=${LINUX_SHA}" >> "$GITHUB_OUTPUT"
-          echo "macOS SHA-256: ${MACOS_SHA}"
-          echo "Linux SHA-256: ${LINUX_SHA}"
+          build bun-darwin-arm64 darwin-arm64
+          build bun-darwin-x64   darwin-amd64
+          build bun-linux-x64    linux-amd64
+          build bun-linux-arm64  linux-arm64
 
       - name: Commit version bump (verified, via GitHub API)
         env:
@@ -138,11 +135,12 @@ jobs:
       - name: Create GitHub Release
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          MACOS_SHA="${{ steps.tarballs.outputs.macos_sha }}"
-          NOTES="### Install"$'\n'"brew install yashiels/tap/checkers60"$'\n\n'"Or download a tarball below."$'\n\n'"**macOS arm64 SHA-256:** ${MACOS_SHA}"
+          NOTES="### Install"$'\n'"brew install yashiels/tap/checkers60"$'\n\n'"Or download a tarball below (macOS + Linux, amd64 + arm64)."$'\n\n'"**SHA-256**"$'\n'"- darwin-arm64: ${{ steps.tarballs.outputs.darwin_arm64_sha }}"$'\n'"- darwin-amd64: ${{ steps.tarballs.outputs.darwin_amd64_sha }}"$'\n'"- linux-amd64: ${{ steps.tarballs.outputs.linux_amd64_sha }}"$'\n'"- linux-arm64: ${{ steps.tarballs.outputs.linux_arm64_sha }}"
           gh release create "v${VERSION}" \
-            "${{ steps.tarballs.outputs.macos_tar }}" \
-            "${{ steps.tarballs.outputs.linux_tar }}" \
+            "${{ steps.tarballs.outputs.darwin_arm64_tar }}" \
+            "${{ steps.tarballs.outputs.darwin_amd64_tar }}" \
+            "${{ steps.tarballs.outputs.linux_amd64_tar }}" \
+            "${{ steps.tarballs.outputs.linux_arm64_tar }}" \
             --title "checkers60 v${VERSION}" \
             --generate-notes \
             --notes "$NOTES"
@@ -158,13 +156,20 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          SHA="${{ steps.tarballs.outputs.macos_sha }}"
           TAP="yashiels/homebrew-tap"
           BRANCH="main"
           FORMULA="checkers60"
+          export DARWIN_ARM64_SHA="${{ steps.tarballs.outputs.darwin_arm64_sha }}"
+          export DARWIN_AMD64_SHA="${{ steps.tarballs.outputs.darwin_amd64_sha }}"
+          export LINUX_AMD64_SHA="${{ steps.tarballs.outputs.linux_amd64_sha }}"
+          export LINUX_ARM64_SHA="${{ steps.tarballs.outputs.linux_arm64_sha }}"
 
           python3 -c "
-          v, s = '${VERSION}', '${SHA}'
+          import os, textwrap
+          v = '${VERSION}'
+          base = 'https://github.com/yashiels/checkers60-cli/releases/download/v' + v
+          d_arm, d_amd = os.environ['DARWIN_ARM64_SHA'], os.environ['DARWIN_AMD64_SHA']
+          l_amd, l_arm = os.environ['LINUX_AMD64_SHA'], os.environ['LINUX_ARM64_SHA']
           formula = f'''class Checkers60 < Formula
             desc \"CLI for Checkers Sixty60 grocery delivery\"
             homepage \"https://github.com/yashiels/checkers60-cli\"
@@ -172,8 +177,21 @@ jobs:
 
             on_macos do
               if Hardware::CPU.arm?
-                url \"https://github.com/yashiels/checkers60-cli/releases/download/v{v}/checkers60-v{v}-darwin-arm64.tar.gz\"
-                sha256 \"{s}\"
+                url \"{base}/checkers60-v{v}-darwin-arm64.tar.gz\"
+                sha256 \"{d_arm}\"
+              else
+                url \"{base}/checkers60-v{v}-darwin-amd64.tar.gz\"
+                sha256 \"{d_amd}\"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url \"{base}/checkers60-v{v}-linux-arm64.tar.gz\"
+                sha256 \"{l_arm}\"
+              else
+                url \"{base}/checkers60-v{v}-linux-amd64.tar.gz\"
+                sha256 \"{l_amd}\"
               end
             end
 
@@ -186,7 +204,6 @@ jobs:
             end
           end
           '''
-          import textwrap
           open('formula.rb', 'w').write(textwrap.dedent(formula).lstrip())
           "
 
@@ -217,5 +234,7 @@ jobs:
         with:
           name: checkers60-v${{ steps.version.outputs.version }}-binaries
           path: |
-            ${{ steps.tarballs.outputs.macos_tar }}
-            ${{ steps.tarballs.outputs.linux_tar }}
+            ${{ steps.tarballs.outputs.darwin_arm64_tar }}
+            ${{ steps.tarballs.outputs.darwin_amd64_tar }}
+            ${{ steps.tarballs.outputs.linux_amd64_tar }}
+            ${{ steps.tarballs.outputs.linux_arm64_tar }}
