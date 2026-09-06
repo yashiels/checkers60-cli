@@ -16,6 +16,7 @@ interface CodeRef {
 /** Raw bonus-buy deal as returned by the catalog (`bonusBuys` map value). */
 export interface RawBonusBuy {
   id: string;
+  active?: boolean;
   code?: string;
   promotionId?: string;
   name?: string;
@@ -48,9 +49,15 @@ export interface BonusBuy {
   discountValue?: number;
   /** True when the deal is Xtra-Savings-members only (`fox_members`). */
   membersOnly: boolean;
+  /** True ONLY when the raw deal is explicitly `active: true`. */
+  active: boolean;
+  /** True ONLY on a positive sixty60 signal (channel flag true, or an override object). */
+  availableOnSixty60: boolean;
   offerTypeCode?: string;
-  startDate?: number;
-  endDate?: number;
+  /** Finite epoch-ms, `null` when present-but-invalid, `undefined` when absent. */
+  startDate?: number | null;
+  /** Finite epoch-ms, `null` when present-but-invalid, `undefined` when absent. */
+  endDate?: number | null;
   /** `endDate` rendered as an ISO-8601 string, when present. */
   validUntil?: string;
   /** Mongo product ids of the qualifying member set (NOT a threshold). */
@@ -93,7 +100,19 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
 
-function isoOrUndefined(epochMs?: number): string | undefined {
+/**
+ * Normalize a date boundary: a finite epoch-ms number passes through; a value
+ * that is PRESENT but not a finite number — `null` (e.g. an override nulling out
+ * a valid top-level date), NaN, a string, ±Infinity — becomes `null` so the
+ * active check can fail CLOSED on it; only an absent field (`undefined`) stays
+ * `undefined` (unbounded on that side).
+ */
+function epochBound(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function isoOrUndefined(epochMs?: number | null): string | undefined {
   if (typeof epochMs !== "number" || !Number.isFinite(epochMs)) return undefined;
   const d = new Date(epochMs);
   return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
@@ -113,10 +132,14 @@ export function normalizeBonusBuy(raw: RawBonusBuy): BonusBuy {
     discountTypeCode: p("discountType")?.code,
     discountValue: typeof discountValue === "number" ? discountValue : undefined,
     membersOnly: p("memberType")?.code === "fox_members",
+    active: p("active") === true,
+    availableOnSixty60:
+      raw.channelSpecificPromotions?.sixty60 === true ||
+      isPlainObject(raw.channelSpecificPromotions?.sixty60),
     offerTypeCode: p("offerType")?.code,
-    startDate: p("startDate"),
-    endDate: p("endDate"),
-    validUntil: isoOrUndefined(p("endDate")),
+    startDate: epochBound(p("startDate")),
+    endDate: epochBound(p("endDate")),
+    validUntil: isoOrUndefined(epochBound(p("endDate"))),
     memberProductIds: stringList(p("productIds")),
     memberArticleNumbers: stringList(p("products")),
     channelIndicator: p("channelIndicator"),

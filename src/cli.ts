@@ -240,6 +240,32 @@ Examples:
     })
   );
 
+// ── savings ────────────────────────────────────────────────────────────
+program
+  .command("savings")
+  .description("Show the bonus-buy deals your current cart's items qualify for")
+  .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Read-only awareness view: it lists each active bonus-buy deal a cart item
+qualifies for, the deal's human terms (where the buy-quantity & saving live),
+and the other qualifying products as eligible OPTIONS. It never claims a deal is
+complete, shows no threshold/progress, and invents no saving. Complete a deal by
+adding items with the gated 'checkers60 add'.
+
+Examples:
+  $ checkers60 savings
+  $ checkers60 savings --json
+`
+  )
+  .action(
+    wrap(async (opts: { json?: boolean }) => {
+      const { savings } = await import("./commands/savings.js");
+      await savings({ json: mergeJson(opts) });
+    })
+  );
+
 // ── offers ─────────────────────────────────────────────────────────────
 program
   .command("offers")

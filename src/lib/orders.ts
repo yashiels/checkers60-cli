@@ -1,5 +1,9 @@
 import {
   CheckersAPI,
+  type BonusBuy,
+  type CartLineItem,
+  type Product,
+  type RawCartSavings,
   type RawCatalogProduct,
   type RawCompletedOrder,
   type RawCustomerProfile,
@@ -344,6 +348,65 @@ export function buildCheckoutSelectionInfo(slots: SlotDTO[]): CheckoutSelectionI
     customTipAllowed: true,
   };
 }
+/**
+ * One cart line that qualifies for a bonus-buy deal. Membership only — its
+ * presence never implies the deal's buy-threshold is met.
+ */
+export interface DealCartItemDTO {
+  productId: string;
+  name: string | null;
+  quantity: number;
+}
+
+/**
+ * One active bonus-buy deal that the current cart TOUCHES. Purely an awareness
+ * view: it reports the human `terms`, which cart items qualify, and the OTHER
+ * qualifying product ids as eligible OPTIONS (a hint, never "required"). It
+ * deliberately carries NO threshold, NO "N-short", NO progress, and NO
+ * rand-saved figure — those are not machine-readable on a bonus-buy deal, and
+ * completing a deal is the user's job via the gated `add`.
+ */
+export interface CartDealDTO {
+  dealId: string;
+  /** Short human heading, e.g. "Buy 2 & Save 20%". */
+  title: string;
+  /** Full human terms — the buy-quantity and saving live only here, as text. */
+  terms: string;
+  /** ISO-8601 deal expiry, or null. */
+  validUntil: string | null;
+  membersOnly: boolean;
+  qualifyingItemsInCart: DealCartItemDTO[];
+  /** Other qualifying product ids NOT in the cart — labelled options, a hint. */
+  eligibleOptionProductIds: string[];
+}
+
+/**
+ * Server-computed savings ALREADY applied to the current cart. Taken VERBATIM
+ * from the cart's `cartSavings` (never computed here) — an aggregate of what the
+ * cart has already saved, NOT a per-deal figure and NOT an amount-to-complete.
+ * Amounts are integer cents; a non-integer/absent field is reported as null.
+ */
+export interface CartSavingsDTO {
+  productSavings: number | null;
+  discountCodesSavings: number | null;
+  totalSavings: number | null;
+}
+
+/**
+ * `savings` output: the deals the current cart touches. `cartItemCount` is the
+ * number of distinct cart lines. `cartSavings` is the server's verbatim
+ * already-applied cart savings (null when the cart reports none). `message`
+ * guides the empty-cart case only.
+ */
+export interface SavingsDTO {
+  cartItemCount: number;
+  cartSavings: CartSavingsDTO | null;
+  deals: CartDealDTO[];
+  message: string | null;
+}
+
+export const SAVINGS_EMPTY_CART_MESSAGE =
+  "Your cart is empty — add items to see the bonus-buy deals they qualify for.";
 
 // ─── Narrow raw input views (read-only; consumed only by the mappers) ────────
 
@@ -993,4 +1056,175 @@ export async function getCheckoutPreview(
     slots = [];
   }
   return mapCheckoutPreview(totals, slots);
+}
+
+// ── cart deal awareness (savings) ────────────────────────────────────────────
+// Read-only view of the bonus-buy deals the current cart touches. A safe
+// awareness surface ONLY: it never computes a threshold, an "items to add", a
+// progress figure, or a rand saving — a bonus-buy's buy-quantity and saving live
+// solely in its human `terms` text (discountValue is 0 for the complex type).
+
+/** Catalog products/filter caps a single request at this many rows. */
+const PRODUCT_FILTER_PAGE_SIZE = 50;
+
+/**
+ * Map the cart's raw `cartSavings` to the allowlisted DTO, VERBATIM. Each field
+ * is copied only when it is a safe integer (cents); anything else becomes null,
+ * and an absent/empty envelope yields null — never a fabricated figure.
+ */
+export function mapCartSavings(raw: RawCartSavings | undefined): CartSavingsDTO | null {
+  if (!raw || typeof raw !== "object") return null;
+  const productSavings = toCents(raw.productSavings);
+  const discountCodesSavings = toCents(raw.discountCodesSavings);
+  const totalSavings = toCents(raw.totalSavings);
+  if (productSavings === null && discountCodesSavings === null && totalSavings === null) {
+    return null;
+  }
+  return { productSavings, discountCodesSavings, totalSavings };
+}
+
+/**
+ * True when a deal is live: explicitly active, on sixty60, and inside its
+ * validity window. A boundary that is present but invalid (normalized to `null`)
+ * fails CLOSED — a deal whose window can't be verified is never surfaced. An
+ * absent boundary (`undefined`) is unbounded on that side.
+ */
+export function isDealActive(deal: BonusBuy, now: number): boolean {
+  if (!deal.active || !deal.availableOnSixty60) return false;
+  if (deal.startDate === null || deal.endDate === null) return false;
+  if (typeof deal.startDate === "number" && now < deal.startDate) return false;
+  if (typeof deal.endDate === "number" && now > deal.endDate) return false;
+  return true;
+}
+
+/**
+ * Whether a product's article number is in the deal's qualifying article set.
+ * A deal lists article numbers with a trailing unit code (e.g. "10139271EA")
+ * while the catalog `articleNumber` is the bare digit core ("10139271"), so an
+ * entry also matches when that trailing unit suffix is removed. Exact match is
+ * still honoured first; empty values never match.
+ */
+function articleInSet(article: string | undefined, memberArticleNumbers: string[]): boolean {
+  if (!article) return false;
+  for (const entry of memberArticleNumbers) {
+    if (entry === article) return true;
+    const core: string = entry.replace(/[A-Za-z]+$/, "");
+    if (core.length > 0 && core === article) return true;
+  }
+  return false;
+}
+
+/** True when this cart line's product belongs to the deal's qualifying set. */
+function lineTouchesDeal(
+  line: CartLineItem,
+  product: Product | undefined,
+  deal: BonusBuy
+): boolean {
+  if (product?.bonusBuyIds?.includes(deal.id)) return true;
+  if (deal.memberProductIds.includes(line.productId)) return true;
+  return articleInSet(product?.articleNumber, deal.memberArticleNumbers);
+}
+
+/**
+ * Build a {@link CartDealDTO} from a normalized deal and the cart lines that
+ * qualify for it. Qualifying items are aggregated by productId (quantities
+ * summed); eligible options are the deal's OTHER member product ids, stably
+ * de-duplicated, with every in-cart product removed — ids only, as a hint.
+ */
+export function mapCartDeal(
+  deal: BonusBuy,
+  lines: CartLineItem[],
+  names: Map<string, string>
+): CartDealDTO {
+  const byProduct = new Map<string, DealCartItemDTO>();
+  for (const line of lines) {
+    const existing = byProduct.get(line.productId);
+    if (existing) {
+      existing.quantity += line.quantity;
+    } else {
+      byProduct.set(line.productId, {
+        productId: line.productId,
+        name: names.get(line.productId) ?? null,
+        quantity: line.quantity,
+      });
+    }
+  }
+  const inCart = new Set(byProduct.keys());
+  const eligible: string[] = [];
+  const seen = new Set<string>();
+  for (const id of deal.memberProductIds) {
+    if (!inCart.has(id) && !seen.has(id)) {
+      seen.add(id);
+      eligible.push(id);
+    }
+  }
+  return {
+    dealId: deal.id,
+    title: deal.title,
+    terms: deal.description,
+    validUntil: deal.validUntil ?? null,
+    membersOnly: deal.membersOnly,
+    qualifyingItemsInCart: [...byProduct.values()],
+    eligibleOptionProductIds: eligible,
+  };
+}
+
+/** Split a list into fixed-size chunks (in order). */
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/**
+ * The deals the current cart touches, as an allowlisted {@link SavingsDTO}.
+ * Read-only: reads the cart, then resolves its products' bonus-buy deals via the
+ * catalog. Cart products are fetched in <=50-id batches (the catalog's page cap)
+ * so a large cart is never silently truncated; deals are de-duplicated by id.
+ * `now` is injectable for deterministic active-window tests.
+ */
+export async function getCartSavings(
+  api: CheckersAPI = new CheckersAPI(),
+  now: number = Date.now()
+): Promise<SavingsDTO> {
+  const state = await api.getCart();
+  const lines = state.items;
+  if (lines.length === 0) {
+    return {
+      cartItemCount: 0,
+      cartSavings: null,
+      deals: [],
+      message: SAVINGS_EMPTY_CART_MESSAGE,
+    };
+  }
+
+  const uniqueIds = [...new Set(lines.map((l) => l.productId))];
+  const productById = new Map<string, Product>();
+  const dealById = new Map<string, BonusBuy>();
+  for (const ids of chunk(uniqueIds, PRODUCT_FILTER_PAGE_SIZE)) {
+    const { products, deals } = await api.getProductsWithDeals(ids);
+    for (const p of products) if (!productById.has(p.id)) productById.set(p.id, p);
+    for (const d of deals) if (!dealById.has(d.id)) dealById.set(d.id, d);
+  }
+
+  const names = new Map<string, string>();
+  for (const p of productById.values()) {
+    if (p.name) names.set(p.id, p.name);
+  }
+
+  const activeDeals = [...dealById.values()].filter((d) => isDealActive(d, now));
+  const cartDeals: CartDealDTO[] = [];
+  for (const deal of activeDeals) {
+    const qualifying = lines.filter((l) =>
+      lineTouchesDeal(l, productById.get(l.productId), deal)
+    );
+    if (qualifying.length > 0) cartDeals.push(mapCartDeal(deal, qualifying, names));
+  }
+
+  return {
+    cartItemCount: lines.length,
+    cartSavings: mapCartSavings(state.cartSavings),
+    deals: cartDeals,
+    message: null,
+  };
 }

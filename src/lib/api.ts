@@ -57,6 +57,8 @@ export interface Product {
   oldPrice?: number;
   /** Ids of the bonus-buy deals this product qualifies for. */
   bonusBuyIds?: string[];
+  /** Catalog article number (matches a deal's `products` set), when present. */
+  articleNumber?: string;
   /** Raw discount amount reported by the catalog (cents), when present. */
   discount?: number;
   /** Raw `isOnPromotion` flag from the catalog, preserved verbatim. */
@@ -77,11 +79,20 @@ export interface CartLineItem {
   [key: string]: unknown;
 }
 
+/** Server-computed savings already applied to a cart (integer cents). */
+export interface RawCartSavings {
+  productSavings?: number;
+  discountCodesSavings?: number;
+  totalSavings?: number;
+}
+
 export interface CartState {
   carts: CartEnvelope[];
   cartId: string | null;
   cartVersion: number;
   items: CartLineItem[];
+  /** Raw server-reported savings for the primary cart, when present. */
+  cartSavings?: RawCartSavings;
 }
 
 interface CartEnvelope {
@@ -91,6 +102,7 @@ interface CartEnvelope {
     serviceOptionId?: string;
     deliveryAddressId?: string;
     lineItems?: CartLineItem[];
+    cartSavings?: RawCartSavings;
   };
 }
 
@@ -272,6 +284,17 @@ export function objectId(): string {
   return ts + randomBytes(8).toString("hex");
 }
 
+/**
+ * The catalog product's article number — the verified key a bonus-buy deal
+ * lists its members by (deal `products`). ONLY the actual `articleNumber` field
+ * is read (never barcode/sku/code aliases, which are different identifiers and
+ * would cause false deal matches), and only a non-empty scalar string.
+ */
+function pickArticleNumber(raw: RawCatalogProduct): string | undefined {
+  const v = raw.articleNumber;
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
+}
+
 /** Normalize a raw catalog product into the CLI's Product shape. */
 export function mapCatalogProduct(raw: RawCatalogProduct): Product {
   return {
@@ -288,6 +311,7 @@ export function mapCatalogProduct(raw: RawCatalogProduct): Product {
     bonusBuyIds: Array.isArray(raw.bonusBuyIds)
       ? (raw.bonusBuyIds as string[])
       : undefined,
+    articleNumber: pickArticleNumber(raw),
     discount: typeof raw.discount === "number" ? raw.discount : undefined,
     isOnPromotion:
       typeof raw.isOnPromotion === "boolean" ? raw.isOnPromotion : undefined,
@@ -569,6 +593,7 @@ export class CheckersAPI {
       cartId: primary?.item?.id ?? null,
       cartVersion: primary?.item?.cartVersion ?? 0,
       items: primary?.item?.lineItems ?? [],
+      cartSavings: primary?.item?.cartSavings,
     };
   }
 
