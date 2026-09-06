@@ -43,6 +43,21 @@ function mergeJson(opts?: { json?: boolean }): boolean {
   return isJson() || Boolean(opts?.json);
 }
 
+/**
+ * Strictly parse a positive-integer CLI argument. `parseInt` silently truncates
+ * garbage ("1.5"→1, "12abc"→12, "1e3"→1, "1_000"→1) and yields NaN for others,
+ * so malformed counts/pages leaked through as wrong values or empty pages. Only
+ * an all-digits string (optionally surrounded by whitespace) is accepted.
+ */
+function parseCount(raw: string, label: string): number {
+  const t = raw.trim();
+  const n = Number(t);
+  if (!/^\d+$/.test(t) || !Number.isSafeInteger(n) || n < 1) {
+    throw new UsageError(`Invalid ${label} "${raw}". Must be a positive whole number.`);
+  }
+  return n;
+}
+
 const program = new Command()
   .name("checkers60")
   .description("CLI for Checkers Sixty60 grocery delivery (mobile-app API)")
@@ -109,8 +124,8 @@ Quick start:
 
 Cart management:
   $ checkers60 cart                    # View your cart
-  $ checkers60 cart suggestions        # See recommended items
-  $ checkers60 cart promos             # See cart promotions
+  $ checkers60 cart forgotten          # Products you usually buy but haven't added
+  $ checkers60 cart suggest            # Smart-cart product recommendations
 
 Global flags:
   --json  Emit machine-readable JSON (also via CHECKERS60_JSON=1). Errors become
@@ -213,8 +228,8 @@ Examples:
     wrap(async (query: string, opts: { page: string; limit: string; json?: boolean }) => {
       const { search } = await import("./commands/search.js");
       await search(query, {
-        page: parseInt(opts.page, 10),
-        limit: parseInt(opts.limit, 10),
+        page: parseCount(opts.page, "page"),
+        limit: parseCount(opts.limit, "limit"),
         json: mergeJson(opts),
       });
     })
@@ -424,7 +439,7 @@ Examples:
         opts: { json?: boolean; mode?: string; confirm?: string }
       ) => {
         const { add } = await import("./commands/add.js");
-        await add(target, qty === undefined ? 1 : parseInt(qty, 10), {
+        await add(target, qty === undefined ? 1 : parseCount(qty, "quantity"), {
           json: mergeJson(opts),
           mode: opts.mode,
           confirm: opts.confirm,
@@ -459,7 +474,7 @@ Examples:
         opts: { json?: boolean; mode?: string; confirm?: string }
       ) => {
         const { remove } = await import("./commands/remove.js");
-        await remove(target, qty === undefined ? undefined : parseInt(qty, 10), {
+        await remove(target, qty === undefined ? undefined : parseCount(qty, "quantity"), {
           json: mergeJson(opts),
           mode: opts.mode,
           confirm: opts.confirm,
@@ -579,7 +594,7 @@ program
   .action(
     wrap(async (opts: { top?: string; json?: boolean }) => {
       const { regulars } = await import("./commands/regulars.js");
-      await regulars({ top: opts.top ? parseInt(opts.top, 10) : 20, json: mergeJson(opts) });
+      await regulars({ top: opts.top ? parseCount(opts.top, "top") : 20, json: mergeJson(opts) });
     })
   );
 

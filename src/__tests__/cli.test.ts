@@ -158,3 +158,33 @@ describe("CLI JSON mode — commander + error envelopes", () => {
     }
   });
 }, 30000);
+
+describe("strict numeric argument parsing (no silent parseInt truncation)", () => {
+  const PROD = "5d54809ee48fd82fb7c2e7df";
+  // These parse BEFORE any network/auth, so they fail fast even logged out.
+  it.each(["1.5", "12abc", "1e3", "1_000", "+2", "0"])(
+    "rejects add quantity %j as invalid usage (exit 2)",
+    async (qty) => {
+      const r = await runCli(["add", PROD, qty, "--json"]);
+      expect(r.code).toBe(2);
+      const parsed = JSON.parse(r.stdout.trim());
+      expect(parsed.error).toMatch(/positive whole number/i);
+    }
+  );
+
+  it.each(["abc", "0", "1.5"])(
+    "rejects search --page %j as invalid usage (exit 2)",
+    async (page) => {
+      const r = await runCli(["search", "milk", "--page", page, "--json"]);
+      expect(r.code).toBe(2);
+      expect(JSON.parse(r.stdout.trim()).error).toMatch(/positive whole number/i);
+    }
+  );
+
+  it("still accepts a valid integer quantity (reaches auth, not a usage error)", async () => {
+    // Logged out → add proceeds past parsing and fails on auth (exit 3), NOT
+    // usage (exit 2). Proves a good value is not rejected by the strict parser.
+    const r = await runCli(["add", PROD, "2", "--json"]);
+    expect(r.code).not.toBe(2);
+  });
+});
