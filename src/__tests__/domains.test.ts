@@ -13,6 +13,23 @@ const firstSlotsFixture = loadFixture("api-first-delivery-slots.json");
 const returnGroupsFixture = loadFixture("api-return-groups.json");
 const favouritesFixture = loadFixture("api-favourites.json");
 const customerProfileFixture = loadFixture("api-customer-profile.json");
+const preOrderFixture = loadFixture("api-pre-order.json");
+
+/** A populated single-cart `/carts/user` response (drives getDeliverySlots → pre-order). */
+const populatedCart = {
+  carts: [
+    {
+      item: {
+        id: "cart-1",
+        cartVersion: 3,
+        serviceOptionId: "sixty-min-delivery",
+        lineItems: [
+          { id: "li-1", productId: "p1", quantity: 2, price: 9250, priceFactor: 100, storeId: "store-1" },
+        ],
+      },
+    },
+  ],
+};
 
 // ── request mock (branch by URL) ─────────────────────────────────────────
 const requestMock = vi.fn();
@@ -53,10 +70,12 @@ import {
   mapFirstDeliverySlots,
   mapMembership,
   mapWallet,
-  checkoutPreviewDTO,
+  mapCheckoutPreview,
+  emptyCheckoutPreview,
+  getCheckoutPreview,
+  CHECKOUT_EMPTY_CART_MESSAGE,
   resolveServiceOption,
   HYPER_DEFERRED_MESSAGE,
-  CHECKOUT_PREVIEW_DEFERRED_MESSAGE,
   DELIVERY_MODES,
   getRegulars,
   getReorderPreview,
@@ -709,9 +728,31 @@ describe("slots --mode hyper is deferred", () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════
-// checkout --preview is deferred: preview-only, no network, no order
+// checkout --preview surfaces pre-order TOTALS (read-only, no place-order)
 // ════════════════════════════════════════════════════════════════════════
-describe("checkout --preview is deferred (read-only, no place-order)", () => {
+const CHECKOUT_KEYS = [
+  "preview",
+  "populated",
+  "currency",
+  "subtotal",
+  "total",
+  "fees",
+  "minimumOrder",
+  "violations",
+  "quoteId",
+  "quoteExpiry",
+  "message",
+];
+
+/** Route `/carts/user` + `/orders/pre-order` for a populated checkout preview. */
+function checkoutRouter(...args: unknown[]) {
+  const url = String(args[1] ?? "");
+  if (url.includes("/carts/user")) return ok(populatedCart);
+  if (url.includes("/orders/pre-order")) return ok(preOrderFixture);
+  return routeRequest(...args);
+}
+
+describe("checkout --preview surfaces pre-order totals", () => {
   it("without --preview: UsageError (exit 2) and NO request", async () => {
     let thrown: unknown;
     try {
@@ -724,22 +765,94 @@ describe("checkout --preview is deferred (read-only, no place-order)", () => {
     expect(requestMock).not.toHaveBeenCalled();
   });
 
-  it("with --preview: emits the deferral DTO and makes NO request", async () => {
-    const out = await captureStdout(() => checkoutCommand({ preview: true, json: true }));
-    const parsed = JSON.parse(out);
-    expectKeys(parsed, ["preview", "supported", "message"]);
-    expect(parsed.preview).toBe(true);
-    expect(parsed.supported).toBe(false);
-    expect(parsed.message).toBe(CHECKOUT_PREVIEW_DEFERRED_MESSAGE);
-    expect(requestMock).not.toHaveBeenCalled();
+  it("mapCheckoutPreview maps money as integer cents and preserves the UNKNOWN fee", () => {
+    const dto = mapCheckoutPreview(preOrderFixture.totals);
+    expectKeys(dto, CHECKOUT_KEYS);
+    expect(dto.populated).toBe(true);
+    expect(dto.subtotal).toBe(18500);
+    expect(dto.total).toBe(22350);
+    expect(dto.currency).toBe("ZAR");
+    // Every fee is name + amount ONLY, amount an integer (never a float on money).
+    dto.fees.forEach((f) => {
+      expectKeys(f, ["name", "amount"]);
+      expect(Number.isInteger(f.amount)).toBe(true);
+    });
+    // The unknown "eco-bag" category is NOT dropped — name + amount survive.
+    const eco = dto.fees.find((f) => f.name === "Reusable bag levy");
+    expect(eco).toBeDefined();
+    expect(eco).toEqual({ name: "Reusable bag levy", amount: 150 });
+    // Minimum-order status.
+    expect(dto.minimumOrder).toEqual({ value: 35000, met: false, shortfall: 16500 });
+    // Quote id + expiry surfaced (expiry normalized to ISO-8601).
+    expect(dto.quoteId).toBe("PREORDER-Q-0001");
+    expect(dto.quoteExpiry).toBe(new Date("2026-09-06T11:15:00+02:00").toISOString());
+    expect(dto.violations.length).toBe(1);
   });
 
-  it("checkoutPreviewDTO is the fixed deferral shape", () => {
-    expect(checkoutPreviewDTO()).toEqual({
-      preview: true,
-      supported: false,
-      message: CHECKOUT_PREVIEW_DEFERRED_MESSAGE,
+  it("mapCheckoutPreview drops ALL PII/secrets (poison totals)", () => {
+    const dto = mapCheckoutPreview(preOrderFixture.totals);
+    assertClean(dto);
+  });
+
+  it("empty array of fees suppresses scalar-fee fallback (no double-count)", () => {
+    const dto = mapCheckoutPreview({ subTotal: 100, total: 100, fees: [], deliveryFee: 3500 });
+    expect(dto.fees).toEqual([]);
+  });
+
+  it("with --preview + populated cart: emits a clean totals DTO end-to-end", async () => {
+    requestMock.mockImplementation(checkoutRouter);
+    const out = await captureStdout(() => checkoutCommand({ preview: true, json: true }));
+    const parsed = JSON.parse(out);
+    assertClean(parsed);
+    expectKeys(parsed, CHECKOUT_KEYS);
+    expect(parsed.populated).toBe(true);
+    expect(parsed.total).toBe(22350);
+    expect(parsed.fees.some((f: { name: string }) => f.name === "Reusable bag levy")).toBe(true);
+    // The pre-order call WAS made (totals derive from it) — no new endpoint.
+    const urls = requestMock.mock.calls.map((c) => String(c[1]));
+    expect(urls.some((u) => u.includes("/orders/pre-order"))).toBe(true);
+  });
+
+  it("empty cart: populated=false + guidance message, and NO pre-order request", async () => {
+    requestMock.mockImplementation((...args: unknown[]) => {
+      const url = String(args[1] ?? "");
+      if (url.includes("/carts/user")) return ok({ carts: [] });
+      return routeRequest(...args);
     });
+    const out = await captureStdout(() => checkoutCommand({ preview: true, json: true }));
+    const parsed = JSON.parse(out);
+    expectKeys(parsed, CHECKOUT_KEYS);
+    expect(parsed.populated).toBe(false);
+    expect(parsed.total).toBeNull();
+    expect(parsed.fees).toEqual([]);
+    expect(parsed.message).toBe(CHECKOUT_EMPTY_CART_MESSAGE);
+    const urls = requestMock.mock.calls.map((c) => String(c[1]));
+    expect(urls.some((u) => u.includes("/orders/pre-order"))).toBe(false);
+  });
+
+  it("emptyCheckoutPreview is the fixed empty-cart shape", () => {
+    expect(emptyCheckoutPreview()).toEqual({
+      preview: true,
+      populated: false,
+      currency: "ZAR",
+      subtotal: null,
+      total: null,
+      fees: [],
+      minimumOrder: { value: null, met: null, shortfall: null },
+      violations: [],
+      quoteId: null,
+      quoteExpiry: null,
+      message: CHECKOUT_EMPTY_CART_MESSAGE,
+    });
+  });
+
+  it("getCheckoutPreview reuses the pre-order call and never places an order", async () => {
+    requestMock.mockImplementation(checkoutRouter);
+    const dto = await getCheckoutPreview();
+    expect(dto.populated).toBe(true);
+    const urls = requestMock.mock.calls.map((c) => String(c[1]));
+    // Only cart read + pre-order — no order-submit / payment endpoint.
+    expect(urls.every((u) => u.includes("/carts/user") || u.includes("/orders/pre-order"))).toBe(true);
   });
 });
 

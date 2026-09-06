@@ -698,17 +698,19 @@ program
 // ── checkout (preview only) ──────────────────────────────────────────────
 program
   .command("checkout")
-  .description("Preview order totals (--preview required; not supported yet)")
+  .description("Preview order totals for the current cart (--preview required)")
   .option("--preview", "Preview totals only — required in this version", false)
   .option("--json", "Output JSON", false)
   .addHelpText(
     "after",
     `
-Read-only: this CLI never places an order. Totals preview needs the pre-order
-totals contract, which is not captured yet, so --preview reports "not supported".
+Read-only: this CLI never places an order. --preview surfaces the pre-order
+totals (subtotal, fee breakdown, total, minimum-order status) for the CURRENT
+populated cart. An empty cart reports "add items first".
 
 Examples:
   $ checkers60 checkout --preview
+  $ checkers60 checkout --preview --json
 `
   )
   .action(

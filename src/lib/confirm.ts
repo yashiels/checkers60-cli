@@ -397,12 +397,17 @@ export function claimPlan(planId: string): void {
 }
 
 /**
- * Acquire an account-scoped local lock so two concurrent `--confirm`s can't
- * both validate-and-execute. Returns a release function.
+ * Acquire an account-scoped local lock so two concurrent `--confirm`s for the
+ * SAME account can't both validate-and-execute. The lock file is keyed by a hash
+ * of the account's userId, so confirms for different accounts use different lock
+ * targets and never serialize against each other. Returns a release function.
  */
-export async function acquireConfirmLock(): Promise<() => Promise<void>> {
+export async function acquireConfirmLock(
+  account: PlanAccount
+): Promise<() => Promise<void>> {
   const dir = ensureDir();
-  const lockTarget = join(dir, ".confirm.lock");
+  const scope = createHash("sha256").update(account.userId).digest("hex").slice(0, 16);
+  const lockTarget = join(dir, `.confirm-${scope}.lock`);
   // proper-lockfile needs the target to exist.
   try {
     closeSync(openSync(lockTarget, "wx", 0o600));

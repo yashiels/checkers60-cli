@@ -428,7 +428,7 @@ export async function runCartMutation(
   const planSnapshot = plan.snapshot;
   const planMutation = plan.mutation;
 
-  const release = await acquireConfirmLock();
+  const release = await acquireConfirmLock(acct);
   try {
     const fresh = await api.getCarts();
     assertNoDupModes(fresh);

@@ -1,0 +1,48 @@
+{
+  "deliverySlots": {
+    "sixty-min-delivery": {
+      "allowASAPDelivery": true,
+      "slots": [
+        { "start": "2026-09-06T11:00:00+02:00", "end": "2026-09-06T12:00:00+02:00", "available": true }
+      ]
+    }
+  },
+  "totals": {
+    "currency": "ZAR",
+    "subTotal": 18500,
+    "total": 22350,
+    "fees": [
+      { "code": "delivery", "name": "Delivery fee", "amount": 3500 },
+      { "code": "bag", "name": "Bag fee", "amount": 200 },
+      {
+        "code": "eco-bag",
+        "name": "Reusable bag levy",
+        "amount": 150,
+        "driverName": "POISON_DRIVER_NAME",
+        "email": "POISON_EMAIL@example.com"
+      }
+    ],
+    "minimumOrderValue": 35000,
+    "minimumOrderMet": false,
+    "violations": [
+      { "message": "Order is below the R350.00 minimum for delivery.", "driverPhone": "POISON_PHONE_0821112222" }
+    ],
+    "quoteId": "PREORDER-Q-0001",
+    "expiresAt": "2026-09-06T11:15:00+02:00",
+    "driver": {
+      "name": "POISON_DRIVER_NAME",
+      "phone": "POISON_PHONE_0821112222",
+      "location": { "lat": 12.345678, "lng": 98.765432 }
+    },
+    "address": {
+      "unit": "POISON_UNIT_42",
+      "street": "POISON_STREET",
+      "suburb": "POISON_SUBURB",
+      "fullAddress": "POISON_FULL_ADDRESS"
+    },
+    "payment": { "token": "POISON_PAYTOKEN", "maskedCardNumber": "POISON_CARD_4111" },
+    "xtraSavingsAccessToken": "POISON_XS_ACCESS",
+    "email": "POISON_EMAIL@example.com",
+    "arbitraryUnknown": "POISON_UNKNOWN"
+  }
+}

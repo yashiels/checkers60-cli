@@ -231,20 +231,63 @@ export interface WalletDTO {
 }
 
 /**
- * `checkout --preview` output. A read-only order-totals preview needs the
- * pre-order totals contract, which was NOT captured (pre-order only returns
- * totals for a populated cart, and no write may populate one). So the command
- * emits this fixed deferral — no network call, and absolutely no place-order,
- * tip, or payment. Mirrors the Hyper-slots deferral.
+ * One line of the order's fee breakdown. Known fee categories are labelled
+ * explicitly; any additional server-provided fee is passed through generically
+ * (its `name` + `amount` ONLY) so packaging / bag / service / future fees are
+ * NEVER silently dropped — and no other field of an uncaptured fee object can
+ * escape. `amount` is in integer minor units (cents).
+ */
+export interface FeeLineDTO {
+  name: string;
+  amount: number;
+}
+
+/** Minimum-order status for the previewed cart. Amounts are cents. */
+export interface MinimumOrderDTO {
+  /** Minimum order value required, or null when not reported. */
+  value: number | null;
+  /** True/false when known (explicit server flag preferred, else derived), null otherwise. */
+  met: boolean | null;
+  /** Amount still needed to reach the minimum, or null. */
+  shortfall: number | null;
+}
+
+/**
+ * `checkout --preview` output: a READ-ONLY totals preview for the current
+ * populated cart, derived from the existing pre-order response
+ * (`getDeliverySlots().totals`) — no new request, no place-order/tip/payment.
+ *
+ * The pre-order `totals` wire shape is NOT captured in this app version, so the
+ * mapper reads a best-effort set of field-name candidates and the fee breakdown
+ * is best-effort; every value stays inside the DTO-allowlist boundary (fields
+ * copied explicitly, no spreads, no raw passthrough) and money is integer cents.
+ * An empty cart (pre-order returns no totals) yields `populated: false` and a
+ * guidance `message` — never an error or a guessed total.
  */
 export interface CheckoutPreviewDTO {
   preview: true;
-  supported: false;
-  message: string;
+  /** False when the cart is empty (pre-order returned no totals). */
+  populated: boolean;
+  currency: string;
+  /** Goods subtotal in cents, or null. */
+  subtotal: number | null;
+  /** Total payable in cents, or null. */
+  total: number | null;
+  /** Complete fee breakdown (known + passed-through unknown categories), cents. */
+  fees: FeeLineDTO[];
+  minimumOrder: MinimumOrderDTO;
+  /** Server validation messages (strings only — never a PII-bearing object). */
+  violations: string[];
+  /** Quote/pre-order id when the response carries one. */
+  quoteId: string | null;
+  /** Quote expiry as ISO-8601 when present and valid. */
+  quoteExpiry: string | null;
+  /** Guidance for the empty-cart case; null when totals are present. */
+  message: string | null;
 }
 
-export const CHECKOUT_PREVIEW_DEFERRED_MESSAGE =
-  "checkout totals preview — not supported yet (pre-order totals contract not captured)";
+export const CHECKOUT_EMPTY_CART_MESSAGE =
+  "Add items to your cart before previewing checkout totals.";
 
 // ─── Narrow raw input views (read-only; consumed only by the mappers) ────────
 
@@ -440,12 +483,175 @@ export function mapWallet(raw: RawCustomerProfile): WalletDTO {
   };
 }
 
-/** The fixed `checkout --preview` deferral DTO (no network call, no guess). */
-export function checkoutPreviewDTO(): CheckoutPreviewDTO {
+// ── checkout preview mapper (pre-order totals → allowlisted DTO) ─────────────
+// The `totals` wire shape is uncaptured, so every value is pulled by explicit
+// candidate key (never a spread), money is coerced to integer cents, and the
+// raw envelope is never passed through. Fee/violation entries copy only their
+// allowlisted sub-fields so PII in unexpected keys cannot escape.
+
+/**
+ * Read a value as integer minor units (cents). The app's money convention is
+ * integer cents everywhere, so anything that is NOT a safe integer (a decimal,
+ * a string, NaN) is rejected as null rather than rounded — a non-integer means
+ * our unit assumption is wrong, and a wrong number is worse than "unknown".
+ */
+function toCents(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+}
+
+function firstCents(obj: Record<string, unknown>, keys: string[]): number | null {
+  for (const k of keys) {
+    const c = toCents(obj[k]);
+    if (c !== null) return c;
+  }
+  return null;
+}
+
+function firstString(obj: Record<string, unknown>, keys: string[]): string | null {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+  }
+  return null;
+}
+
+function firstBool(obj: Record<string, unknown>, keys: string[]): boolean | null {
+  for (const k of keys) {
+    if (typeof obj[k] === "boolean") return obj[k] as boolean;
+  }
+  return null;
+}
+
+const SUBTOTAL_KEYS = ["subTotal", "subtotal", "cartTotal", "itemsTotal"];
+const TOTAL_KEYS = ["total", "totalOwing", "grandTotal", "amountDue", "totalToPay"];
+const FEE_ARRAY_KEYS = ["fees", "feeBreakdown", "charges", "additionalFees"];
+const VIOLATION_KEYS = ["violations", "validationErrors", "errors", "messages"];
+
+/** Known scalar fee fields, used only when no fee array is present. */
+const FEE_SCALARS: { name: string; keys: string[] }[] = [
+  { name: "Delivery fee", keys: ["deliveryFee"] },
+  { name: "Bag fee", keys: ["bagFee"] },
+  { name: "Packaging fee", keys: ["packagingFee"] },
+  { name: "Service fee", keys: ["serviceFee"] },
+];
+
+function mapFeeLine(entry: unknown): FeeLineDTO | null {
+  if (!entry || typeof entry !== "object") return null;
+  const o = entry as Record<string, unknown>;
+  const amount = firstCents(o, ["amount", "value", "fee", "price"]);
+  if (amount === null) return null;
+  const name = firstString(o, ["name", "label", "description", "displayName"]) ?? "Fee";
+  return { name, amount };
+}
+
+/**
+ * Complete fee breakdown. The FIRST field that is genuinely an array wins — even
+ * an empty one suppresses the scalar fallback, so a server that itemizes fees is
+ * never double-counted against the known scalar fields.
+ */
+function extractFees(totals: Record<string, unknown>): FeeLineDTO[] {
+  for (const k of FEE_ARRAY_KEYS) {
+    const arr = totals[k];
+    if (Array.isArray(arr)) {
+      return arr.map(mapFeeLine).filter((f): f is FeeLineDTO => f !== null);
+    }
+  }
+  const lines: FeeLineDTO[] = [];
+  for (const s of FEE_SCALARS) {
+    const amount = firstCents(totals, s.keys);
+    if (amount !== null) lines.push({ name: s.name, amount });
+  }
+  return lines;
+}
+
+function mapMinimumOrder(
+  totals: Record<string, unknown>,
+  subtotal: number | null
+): MinimumOrderDTO {
+  const value = firstCents(totals, ["minimumOrderValue", "minOrderValue", "minimumOrder"]);
+  const explicit = firstBool(totals, ["minimumOrderMet", "meetsMinimumOrder", "minOrderMet"]);
+  let met: boolean | null = explicit;
+  if (met === null && value !== null && subtotal !== null) met = subtotal >= value;
+  let shortfall: number | null = null;
+  if (met === false && value !== null && subtotal !== null) {
+    const diff = value - subtotal;
+    // Keep every emitted money value a safe integer (both inputs already are).
+    shortfall = Number.isSafeInteger(diff) ? Math.max(0, diff) : null;
+  }
+  return { value, met, shortfall };
+}
+
+function violationMessage(entry: unknown): string | null {
+  if (typeof entry === "string") return entry.trim().length > 0 ? entry.trim() : null;
+  if (entry && typeof entry === "object") {
+    return firstString(entry as Record<string, unknown>, [
+      "message",
+      "reason",
+      "description",
+      "text",
+    ]);
+  }
+  return null;
+}
+
+function extractViolations(totals: Record<string, unknown>): string[] {
+  for (const k of VIOLATION_KEYS) {
+    const arr = totals[k];
+    if (Array.isArray(arr)) {
+      return arr.map(violationMessage).filter((s): s is string => s !== null);
+    }
+  }
+  return [];
+}
+
+function mapQuoteExpiry(totals: Record<string, unknown>): string | null {
+  for (const k of ["expiresAt", "expiryTime", "quoteExpiry", "expiry"]) {
+    const v = totals[k];
+    if (typeof v === "number" && Number.isFinite(v)) return new Date(v).toISOString();
+    if (typeof v === "string") {
+      const t = v.trim();
+      const ms = Date.parse(t);
+      // Require an actual ISO-8601 datetime — never pass an arbitrary string through.
+      if (/^\d{4}-\d{2}-\d{2}T/.test(t) && !Number.isNaN(ms)) return new Date(ms).toISOString();
+    }
+  }
+  return null;
+}
+
+/** Map a populated pre-order `totals` envelope to the allowlisted preview DTO. */
+export function mapCheckoutPreview(totals: unknown): CheckoutPreviewDTO {
+  const t = (totals && typeof totals === "object" ? totals : {}) as Record<string, unknown>;
+  const subtotal = firstCents(t, SUBTOTAL_KEYS);
+  const total = firstCents(t, TOTAL_KEYS);
   return {
     preview: true,
-    supported: false,
-    message: CHECKOUT_PREVIEW_DEFERRED_MESSAGE,
+    populated: true,
+    currency: firstString(t, ["currency", "currencyCode"]) ?? "ZAR",
+    subtotal,
+    total,
+    fees: extractFees(t),
+    minimumOrder: mapMinimumOrder(t, subtotal),
+    violations: extractViolations(t),
+    quoteId: firstString(t, ["quoteId", "preOrderId"]),
+    quoteExpiry: mapQuoteExpiry(t),
+    message: null,
+  };
+}
+
+/** Empty-cart preview: no totals, a clean "add items first" guidance message. */
+export function emptyCheckoutPreview(): CheckoutPreviewDTO {
+  return {
+    preview: true,
+    populated: false,
+    currency: "ZAR",
+    subtotal: null,
+    total: null,
+    fees: [],
+    minimumOrder: { value: null, met: null, shortfall: null },
+    violations: [],
+    quoteId: null,
+    quoteExpiry: null,
+    message: CHECKOUT_EMPTY_CART_MESSAGE,
   };
 }
 
@@ -668,4 +874,20 @@ export async function getWallet(
   api: CheckersAPI = new CheckersAPI()
 ): Promise<WalletDTO> {
   return mapWallet(await api.getCustomerProfile());
+}
+
+/**
+ * Read-only checkout totals preview for the current populated cart. Reuses the
+ * existing pre-order call (`getDeliverySlots`) UNCHANGED and surfaces only its
+ * `totals` — no new request, no place-order. An empty cart (no totals) yields
+ * the empty-cart preview.
+ */
+export async function getCheckoutPreview(
+  api: CheckersAPI = new CheckersAPI()
+): Promise<CheckoutPreviewDTO> {
+  const { totals } = await api.getDeliverySlots();
+  if (!totals || typeof totals !== "object" || Object.keys(totals).length === 0) {
+    return emptyCheckoutPreview();
+  }
+  return mapCheckoutPreview(totals);
 }

@@ -152,7 +152,7 @@ export async function runFavMutation(
   }
   const { productId, isFavourite, name } = readPayload(plan.payload, intended);
 
-  const release = await acquireConfirmLock();
+  const release = await acquireConfirmLock(acct);
   try {
     // Single-use: claim BEFORE dispatch.
     claimPlan(plan.planId);
