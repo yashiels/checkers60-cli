@@ -120,6 +120,21 @@ export interface Address {
   identifier?: string;
   name?: string;
   fullAddress?: string;
+  /** Saved geocode, used to resolve serviceable store contexts for a switch. */
+  coordinates?: { latitude?: number; longitude?: number };
+  [key: string]: unknown;
+}
+
+/**
+ * One serviceable store context returned by `/api/v3/store-contexts` for a set
+ * of coordinates. Structurally a {@link StoreContext} (storeId + serviceOptionIds
+ * + capacity/priority/distance), but typed loosely here because it is round-
+ * tripped verbatim into the `update-address` / `transfer-dummies` bodies — only
+ * `storeId` and `serviceOptionIds` are ever read by the CLI.
+ */
+export interface AddressStoreContext {
+  storeId?: string;
+  serviceOptionIds?: string[];
   [key: string]: unknown;
 }
 
@@ -849,6 +864,92 @@ export class CheckersAPI {
       { headers: await this.headers(), retry: "safe" }
     );
     return res.data?.cards ?? [];
+  }
+
+  // ── Delivery-address switch (4-call flow; all reversible) ────────────────
+  // Switching the active delivery address is: (1) mark the saved address active,
+  // (2) resolve serviceable store contexts for its coordinates, (3) point the
+  // carts at the new contexts, (4) transfer line items into freshly-created carts
+  // for the new context (this ROTATES cart ids). Each mutation is `retry:"never"`.
+
+  /**
+   * Mark a saved address as the active delivery address. Captured contract:
+   * `POST {AUTH}/customers/{userId}/addresses/{addressId}/use` with the Bearer
+   * SESSION token → `{success:true}`. The auth host requires the FULL identity
+   * header set (same as {@link getCards}: the minimal set returns 401), so this
+   * uses {@link headers}. A non-success body is surfaced as an error so a failed
+   * switch never reads as done. `retry:"never"`.
+   */
+  async useAddress(addressId: string): Promise<void> {
+    const session = await this.session();
+    const res = await request<{ success?: boolean }>(
+      "POST",
+      `${CONFIG.AUTH_BASE}/customers/${encodeURIComponent(session.userId)}/addresses/${encodeURIComponent(addressId)}/use`,
+      { headers: await this.headers(), json: {}, retry: "never" }
+    );
+    if (res.data?.success !== true) {
+      throw new APIError(res.status, "Address use failed", "", "addresses/use");
+    }
+  }
+
+  /**
+   * Resolve the serviceable store contexts for a set of coordinates. Captured
+   * contract: `POST {CATALOG}/api/v3/store-contexts` with body
+   * `{latitude, longitude}` → `{success, items:[…]}`. A read-only serviceability
+   * lookup, so `retry:"safe"`. Returns the `items` verbatim (empty when absent) —
+   * they are round-tripped into the update-address / transfer-dummies bodies.
+   */
+  async getAddressStoreContexts(
+    latitude: number,
+    longitude: number
+  ): Promise<AddressStoreContext[]> {
+    const session = await this.session();
+    const headers = this.sixty60Headers(session);
+    const res = await request<{ success?: boolean; items?: AddressStoreContext[] }>(
+      "POST",
+      `${CONFIG.CATALOG_API}/api/v3/store-contexts`,
+      { headers, json: { latitude, longitude }, retry: "safe" }
+    );
+    return Array.isArray(res.data?.items) ? (res.data?.items as AddressStoreContext[]) : [];
+  }
+
+  /**
+   * Point the carts at a new set of store contexts. Captured contract:
+   * `POST {ORDERS}/api/v2/carts/update-address` with body `{storeContexts:[…]}`.
+   * Returns the ids of the carts created for the new context (the `toCartIds` the
+   * subsequent transfer moves line items into). `retry:"never"`.
+   */
+  async updateCartAddress(storeContexts: AddressStoreContext[]): Promise<string[]> {
+    const headers = await this.headers();
+    const res = await request<CartsResponse>(
+      "POST",
+      `${CONFIG.ORDERS_API}/api/v2/carts/update-address`,
+      { headers, json: { storeContexts }, retry: "never" }
+    );
+    return (res.data?.carts ?? [])
+      .map((c) => c.item?.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+  }
+
+  /**
+   * Transfer line items from the current carts into the new-context carts.
+   * Captured contract: `POST {ORDERS}/api/v2/carts/transfer-dummies` with body
+   * `{fromCartIds, toCartIds, newDeliveryAddressId, storeContexts}`. This creates
+   * carts for the new store context and moves the line items in — rotating cart
+   * ids — so callers MUST re-read to reconcile. `retry:"never"`.
+   */
+  async transferCartDummies(args: {
+    fromCartIds: string[];
+    toCartIds: string[];
+    newDeliveryAddressId: string;
+    storeContexts: AddressStoreContext[];
+  }): Promise<void> {
+    const headers = await this.headers();
+    await request(
+      "POST",
+      `${CONFIG.ORDERS_API}/api/v2/carts/transfer-dummies`,
+      { headers, json: args, retry: "never" }
+    );
   }
 
   /** Customer-profile header set: Bearer static PROFILE_TOKEN + base app headers. */

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -93,7 +94,7 @@ import {
   getMembership,
   getWallet,
 } from "../lib/orders.js";
-import { classifyError, UsageError, EXIT_USAGE } from "../lib/errors.js";
+import { classifyError, UsageError, EXIT_USAGE, EXIT_CONFIRM } from "../lib/errors.js";
 import { APIError } from "../lib/api.js";
 import { CONFIG } from "../lib/config.js";
 import { initRuntime, resetRuntimeForTests } from "../lib/runtime.js";
@@ -380,7 +381,15 @@ function poisonRouter(...args: unknown[]) {
         IsXtraSavingsCustomer: true,
         xTraSavingsCardNumber: "XS-CARD-0001",
         account: { balanceAmount: 12345, balanceFactor: 100, transactions: [POISON], ...POISON },
-        addresses: [{ _id: "a1", name: "Home", city: "Cape Town", ...POISON }],
+        addresses: [
+          {
+            _id: "a1",
+            name: "Home",
+            city: "Cape Town",
+            ...POISON,
+            coordinates: { latitude: 12.345678, longitude: 98.765432 },
+          },
+        ],
         ...POISON,
       },
       ...POISON,
@@ -396,8 +405,14 @@ function poisonRouter(...args: unknown[]) {
   return ok({});
 }
 
+let plansTmp: string;
+
 beforeEach(async () => {
   process.env.CHECKERS60_DEVICE_ID = "test-device-id";
+  // Isolate any confirmation-plan artifacts (addresses use preview) to a temp dir
+  // so a preview never touches the real home directory.
+  plansTmp = mkdtempSync(join(tmpdir(), "c60-domains-plans-"));
+  process.env.CHECKERS60_PLANS_DIR = plansTmp;
   resetRuntimeForTests();
   await initRuntime();
   ownGroups = [];
@@ -408,6 +423,8 @@ beforeEach(async () => {
 afterEach(() => {
   if (origEnvDeviceId === undefined) delete process.env.CHECKERS60_DEVICE_ID;
   else process.env.CHECKERS60_DEVICE_ID = origEnvDeviceId;
+  delete process.env.CHECKERS60_PLANS_DIR;
+  rmSync(plansTmp, { recursive: true, force: true });
   resetRuntimeForTests();
   vi.restoreAllMocks();
 });
@@ -1319,16 +1336,19 @@ describe("command --json output is clean end-to-end (poisoned API responses)", (
     parsed.forEach((d: object) => expectKeys(d, ["id", "name", "city"]));
   });
 
-  it("addresses use <known>: poisoned profile → allowlisted label only (id/name/city)", async () => {
+  it("addresses use <known>: poisoned profile → clean preview (plan output leaks no coords/PII)", async () => {
     const prevExit = process.exitCode;
     try {
       const out = await captureStdout(() => addressesUse("a1", { json: true }));
       const parsed = JSON.parse(out);
+      // Coordinates (12.345678 / 98.765432) live in the profile but must NEVER
+      // reach the plan output — only the allowlisted id/name label does.
       assertClean(parsed);
-      expectKeys(parsed, ["id", "name", "city", "supported", "message"]);
-      expect(parsed.supported).toBe(false);
-      expect(parsed.id).toBe("a1");
-      expect(process.exitCode).toBe(EXIT_USAGE);
+      expect(parsed.confirmationRequired).toBe(true);
+      const plan = parsed.plan as Record<string, unknown>;
+      expectKeys(plan, ["operation", "planId", "expiresAt", "addressId", "name"]);
+      expect(plan.addressId).toBe("a1");
+      expect(process.exitCode).toBe(EXIT_CONFIRM);
     } finally {
       process.exitCode = prevExit;
     }
@@ -1397,23 +1417,41 @@ describe("command --json output is clean end-to-end (poisoned API responses)", (
 });
 
 // ════════════════════════════════════════════════════════════════════════
-// addresses use <id> — CONSERVATIVE: validate id, NEVER dispatch a switch
+// addresses use <id> — gated switch: preview validates + stages, never writes.
+// (The full preview→confirm→reconcile flow is covered in address-mutate.test.ts.)
 // ════════════════════════════════════════════════════════════════════════
-describe("addresses use <id> is conservative (no delivery-address switch)", () => {
-  /** Profile with one saved address, plus PII the DTO must drop. */
+describe("addresses use <id> preview is read-only + validates the id", () => {
+  const MUTATION_PATH = /\/addresses\/[^/]+\/use$|\/store-contexts$|\/carts\/update-address$|\/carts\/transfer-dummies$/;
+
+  /** Profile with one saved (geocoded) address, plus PII the flow must drop. */
   function profileWithAddress(...args: unknown[]) {
     const url = String(args[1] ?? "");
     if (url.includes("customer-profile/v2")) {
       return ok({
         userProfile: {
-          addresses: [{ _id: "a1", name: "Home", city: "Cape Town", ...POISON }],
+          addresses: [
+            {
+              _id: "a1",
+              name: "Home",
+              city: "Cape Town",
+              ...POISON,
+              coordinates: { latitude: 12.345678, longitude: 98.765432 },
+            },
+          ],
         },
       });
     }
+    if (url.includes("/carts/user")) return ok({ carts: [] });
     return routeRequest(...args);
   }
 
-  it("unknown id → UsageError (exit 2) and makes NO mutation (reads only)", async () => {
+  function mutationCalls(): string[] {
+    return requestMock.mock.calls
+      .map((c) => String(c[1] ?? ""))
+      .filter((u) => MUTATION_PATH.test(u));
+  }
+
+  it("unknown id → UsageError (exit 2) and dispatches NO switch call", async () => {
     requestMock.mockImplementation(profileWithAddress);
     let thrown: unknown;
     try {
@@ -1423,24 +1461,22 @@ describe("addresses use <id> is conservative (no delivery-address switch)", () =
     }
     expect(thrown).toBeInstanceOf(UsageError);
     expect(classifyError(thrown).code).toBe(EXIT_USAGE);
-    // No write of any kind — every call the command made was a GET.
-    const methods = requestMock.mock.calls.map((c) => String(c[0]));
-    expect(methods.every((m) => m === "GET")).toBe(true);
+    expect(mutationCalls()).toHaveLength(0);
   });
 
-  it("known id → supported:false JSON (id/name/city only), exitCode 2, NO mutation", async () => {
+  it("known id → confirmation-required preview (exit 5), clean, NO switch call", async () => {
     requestMock.mockImplementation(profileWithAddress);
     const prevExit = process.exitCode;
     try {
       const out = await captureStdout(() => addressesUse("a1", { json: true }));
       const parsed = JSON.parse(out);
       assertClean(parsed);
-      expectKeys(parsed, ["id", "name", "city", "supported", "message"]);
-      expect(parsed).toMatchObject({ id: "a1", name: "Home", city: "Cape Town", supported: false });
-      expect(typeof parsed.message).toBe("string");
-      expect(process.exitCode).toBe(EXIT_USAGE);
-      const methods = requestMock.mock.calls.map((c) => String(c[0]));
-      expect(methods.every((m) => m === "GET")).toBe(true);
+      expect(parsed.confirmationRequired).toBe(true);
+      const plan = parsed.plan as Record<string, unknown>;
+      expectKeys(plan, ["operation", "planId", "expiresAt", "addressId", "name"]);
+      expect(plan).toMatchObject({ operation: "address.use", addressId: "a1", name: "Home" });
+      expect(process.exitCode).toBe(EXIT_CONFIRM);
+      expect(mutationCalls()).toHaveLength(0);
     } finally {
       process.exitCode = prevExit;
     }

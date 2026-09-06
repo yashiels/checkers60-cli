@@ -507,7 +507,8 @@ const addressesCmd = program
     `
 Examples:
   $ checkers60 addresses
-  $ checkers60 addresses use <id>   # switching from the CLI is not supported yet
+  $ checkers60 addresses use <id>                 # preview → plan id
+  $ checkers60 addresses use <id> --confirm sha256:…
 `
   )
   .action(
@@ -519,12 +520,25 @@ Examples:
 
 addressesCmd
   .command("use <id>")
-  .description("Select a saved delivery address (not supported yet — set it in the app)")
+  .description("Switch the active delivery address (preview by default; --confirm <planId> to apply)")
   .option("--json", "Output JSON", false)
+  .option("--confirm <planId>", "Apply a previously previewed plan")
+  .addHelpText(
+    "after",
+    `
+The switch is two-step: preview prints a plan id and exits 5; re-run with --confirm
+to apply. It re-selects a saved address and rotates your cart ids (contents are
+preserved).
+
+Examples:
+  $ checkers60 addresses use 698c4f79d84d00735d939233                 # preview → plan id
+  $ checkers60 addresses use 698c4f79d84d00735d939233 --confirm sha256:…
+`
+  )
   .action(
-    wrap(async (id: string, opts: { json?: boolean }) => {
+    wrap(async (id: string, opts: { json?: boolean; confirm?: string }) => {
       const { addressesUse } = await import("./commands/addresses.js");
-      await addressesUse(id, { json: mergeJson(opts) });
+      await addressesUse(id, { json: mergeJson(opts), confirm: opts.confirm });
     })
   );
 

@@ -1,14 +1,12 @@
 import chalk from "chalk";
+import { CheckersAPI } from "../lib/api.js";
+import { runAddressUse, type AddressUseOptions } from "../lib/address-mutate.js";
 import { getAddresses } from "../lib/orders.js";
-import { EXIT_USAGE, UsageError } from "../lib/errors.js";
 import { startSpinner } from "../lib/output.js";
 
 export interface AddressesOptions {
   json?: boolean;
 }
-
-const USE_UNSUPPORTED_MESSAGE =
-  "Switching the delivery address from the CLI is not supported yet — set it in the app.";
 
 /**
  * List saved delivery addresses. Only id + label + city are emitted — never the
@@ -41,44 +39,14 @@ export async function addresses(options: AddressesOptions = {}): Promise<void> {
 }
 
 /**
- * `addresses use <id>` — CONSERVATIVE. A multi-address delivery SWITCH has no
- * captured cart/store/slot transformation, so this command dispatches NO
- * mutation and makes no network write. It validates the id against the account's
- * own saved addresses (unknown → UsageError, exit 2), and for a known id prints
- * an allowlisted LABEL only (name/city — never the full address or coordinates),
- * reports `supported:false`, and exits non-zero so a script cannot read it as a
- * successful switch.
+ * `addresses use <id>` — CONFIRMATION-GATED delivery-address switch. Preview by
+ * default (reads only, prints a plan id, exits 5); `--confirm <planId>` applies
+ * the 4-call switch and reconciles by re-reading. Same safety model as the cart
+ * mutations; the real work lives in {@link runAddressUse}.
  */
 export async function addressesUse(
   id: string,
-  options: AddressesOptions = {}
+  options: AddressUseOptions = {}
 ): Promise<void> {
-  const { json = false } = options;
-  const spinner = json ? null : startSpinner("Checking address…");
-
-  const items = await getAddresses();
-  spinner?.stop();
-
-  const found = items.find((a) => a.id === id);
-  if (!found) {
-    throw new UsageError(`Address ${id} not found in your saved addresses.`);
-  }
-
-  process.exitCode = EXIT_USAGE;
-
-  if (json) {
-    const body = {
-      id: found.id,
-      name: found.name,
-      city: found.city,
-      supported: false,
-      message: USE_UNSUPPORTED_MESSAGE,
-    };
-    process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
-    return;
-  }
-
-  const label = found.city ? `${found.name || "(unnamed)"} — ${found.city}` : found.name || "(unnamed)";
-  process.stdout.write(`\n${chalk.bold(label)}\n`);
-  process.stdout.write(`${chalk.yellow(USE_UNSUPPORTED_MESSAGE)}\n\n`);
+  await runAddressUse(new CheckersAPI(), id, options);
 }
