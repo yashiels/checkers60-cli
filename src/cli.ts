@@ -10,12 +10,21 @@ import { wrap, handleError, UsageError, EXIT_USAGE } from "./lib/errors.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-let version = "0.1.0";
+// Baked in at compile time for the standalone binaries (`bun build --define`),
+// which can't read package.json at runtime — without this they report the stale
+// fallback. `typeof` guards the undeclared identifier for the tsup/npm build,
+// where the package.json read below (dev via tsx, or npm install alongside dist)
+// is authoritative instead.
+declare const __CHECKERS60_VERSION__: string | undefined;
+let version =
+  typeof __CHECKERS60_VERSION__ === "string" && __CHECKERS60_VERSION__
+    ? __CHECKERS60_VERSION__
+    : "0.1.0";
 try {
   const pkg = JSON.parse(
     readFileSync(join(__dirname, "..", "package.json"), "utf-8")
   );
-  version = pkg.version;
+  if (pkg.version) version = pkg.version;
 } catch {}
 
 /** Detect JSON mode from argv (`--json` anywhere) or `CHECKERS60_JSON` env. */
