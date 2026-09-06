@@ -1,0 +1,27 @@
+{
+  "success": true,
+  "cards": [
+    {
+      "token": "SYNTH-TOKEN-0001",
+      "maskedCardNumber": "•••• 0001",
+      "expiryMonth": "07",
+      "expiryYear": "2029",
+      "cardHasBeenUsed": true,
+      "cardholderName": "SYNTH CARDHOLDER ONE",
+      "isDefault": true,
+      "issuer": "VISA",
+      "mostRecentlyUsed": true
+    },
+    {
+      "token": "SYNTH-TOKEN-0002",
+      "maskedCardNumber": "•••• 0002",
+      "expiryMonth": "11",
+      "expiryYear": "2027",
+      "cardHasBeenUsed": false,
+      "cardholderName": "SYNTH CARDHOLDER TWO",
+      "isDefault": false,
+      "issuer": "MASTERCARD",
+      "mostRecentlyUsed": false
+    }
+  ]
+}

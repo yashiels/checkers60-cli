@@ -457,14 +457,33 @@ program
   );
 
 // ── addresses ──────────────────────────────────────────────────────────
-program
+const addressesCmd = program
   .command("addresses")
   .description("List delivery addresses")
   .option("--json", "Output JSON", false)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ checkers60 addresses
+  $ checkers60 addresses use <id>   # switching from the CLI is not supported yet
+`
+  )
   .action(
     wrap(async (opts: { json?: boolean }) => {
       const { addresses } = await import("./commands/addresses.js");
       await addresses({ json: mergeJson(opts) });
+    })
+  );
+
+addressesCmd
+  .command("use <id>")
+  .description("Select a saved delivery address (not supported yet — set it in the app)")
+  .option("--json", "Output JSON", false)
+  .action(
+    wrap(async (id: string, opts: { json?: boolean }) => {
+      const { addressesUse } = await import("./commands/addresses.js");
+      await addressesUse(id, { json: mergeJson(opts) });
     })
   );
 

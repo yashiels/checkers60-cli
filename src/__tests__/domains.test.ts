@@ -14,6 +14,7 @@ const returnGroupsFixture = loadFixture("api-return-groups.json");
 const favouritesFixture = loadFixture("api-favourites.json");
 const customerProfileFixture = loadFixture("api-customer-profile.json");
 const preOrderFixture = loadFixture("api-pre-order.json");
+const cardsFixture = loadFixture("api-cards.json");
 
 /** A populated single-cart `/carts/user` response (drives getDeliverySlots → pre-order). */
 const populatedCart = {
@@ -70,6 +71,8 @@ import {
   mapFirstDeliverySlots,
   mapMembership,
   mapWallet,
+  mapCard,
+  getCards,
   mapCheckoutPreview,
   emptyCheckoutPreview,
   getCheckoutPreview,
@@ -99,7 +102,8 @@ import { orders as ordersCommand, ordersShow } from "../commands/orders.js";
 import { track as trackCommand } from "../commands/track.js";
 import { returns as returnsCommand, returnsShow } from "../commands/returns.js";
 import { fav as favCommand } from "../commands/fav.js";
-import { addresses as addressesCommand } from "../commands/addresses.js";
+import { addresses as addressesCommand, addressesUse } from "../commands/addresses.js";
+import { cards as cardsCommand } from "../commands/cards.js";
 import { slots as slotsCommand } from "../commands/slots.js";
 import { plus as plusCommand } from "../commands/plus.js";
 import { wallet as walletCommand } from "../commands/wallet.js";
@@ -225,6 +229,7 @@ function routeRequest(...args: unknown[]) {
   if (url.includes("/first-delivery-slots")) return ok(firstSlotsFixture);
   if (url.includes("/return-groups/app/user")) return ok(returnGroupsFixture);
   if (url.includes("/products/favourites")) return ok(favouritesFixture);
+  if (url.endsWith("/cards")) return ok(cardsFixture);
   if (url.includes("customer-profile/v2")) return ok(customerProfileFixture);
   if (url.includes("/products/filter")) {
     const ids = opts.json?.filter?.productListSource?.productIds ?? [];
@@ -347,6 +352,26 @@ function poisonRouter(...args: unknown[]) {
   }
   if (url.includes("/products/favourites")) {
     return ok({ favourites: [{ productId: "p1", ...POISON }], ...POISON });
+  }
+  if (url.endsWith("/cards")) {
+    return ok({
+      success: true,
+      cards: [
+        {
+          ...POISON,
+          issuer: "VISA",
+          maskedCardNumber: "•••• 0007",
+          expiryMonth: "07",
+          expiryYear: "2029",
+          isDefault: true,
+          token: "POISON_CARDTOKEN",
+          cardholderName: "POISON_CARDHOLDER_NAME",
+          cardHasBeenUsed: true,
+          mostRecentlyUsed: true,
+        },
+      ],
+      ...POISON,
+    });
   }
   if (url.includes("customer-profile/v2")) {
     return ok({
@@ -566,6 +591,43 @@ describe("DTO mappers redact all PII/secrets (synthetic poison inputs)", () => {
     const noAccount = mapWallet({ ...POISON } as never);
     expect(noAccount.balance).toBeNull();
   });
+
+  it("mapCard (keeps issuer/masked/expiry/default; drops token/cardholderName/usage flags)", () => {
+    const dto = mapCard({
+      ...POISON,
+      issuer: "VISA",
+      maskedCardNumber: "•••• 4242",
+      expiryMonth: "07",
+      expiryYear: "2029",
+      isDefault: true,
+      token: "POISON_CARDTOKEN",
+      cardholderName: "POISON_CARDHOLDER_NAME",
+      cardHasBeenUsed: true,
+      mostRecentlyUsed: true,
+    } as never);
+    assertClean(dto);
+    expect(JSON.stringify(dto)).not.toContain("POISON_CARDHOLDER_NAME");
+    expectKeys(dto, ["issuer", "maskedCardNumber", "expiryMonth", "expiryYear", "isDefault"]);
+    expect(dto).toEqual({
+      issuer: "VISA",
+      maskedCardNumber: "•••• 4242",
+      expiryMonth: "07",
+      expiryYear: "2029",
+      isDefault: true,
+    });
+  });
+
+  it("mapCard defaults isDefault to false and missing fields to null", () => {
+    const dto = mapCard({ issuer: "VISA" } as never);
+    expectKeys(dto, ["issuer", "maskedCardNumber", "expiryMonth", "expiryYear", "isDefault"]);
+    expect(dto).toEqual({
+      issuer: "VISA",
+      maskedCardNumber: null,
+      expiryMonth: null,
+      expiryYear: null,
+      isDefault: false,
+    });
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════
@@ -630,6 +692,40 @@ describe("real fixtures parse to allowlisted DTOs", () => {
     expectKeys(dto, ["balance", "currency"]);
     expect(dto).toEqual({ balance: 12345, currency: "ZAR" });
     assertClean(dto);
+  });
+
+  const CARD_KEYS = ["issuer", "maskedCardNumber", "expiryMonth", "expiryYear", "isDefault"];
+
+  it("cards: api-cards fixture → CardDTO[] (5 keys; token/cardholderName never surface)", async () => {
+    const dtos = await getCards();
+    expect(dtos.length).toBe(cardsFixture.cards.length);
+    dtos.forEach((d) => expectKeys(d, CARD_KEYS));
+    const serialized = JSON.stringify(dtos);
+    expect(serialized).not.toContain("SYNTH-TOKEN");
+    expect(serialized).not.toContain("CARDHOLDER");
+    expect(dtos[0].isDefault).toBe(true);
+    expect(dtos[1].isDefault).toBe(false);
+  });
+
+  it("getCards GETs /customers/{userId}/cards with the Bearer SESSION token (no profile token)", async () => {
+    await getCards();
+    const call = requestMock.mock.calls.find((c) => String(c[1]).endsWith("/cards"));
+    expect(call).toBeDefined();
+    expect(String(call![0])).toBe("GET");
+    expect(String(call![1])).toContain("/customers/user-id/cards");
+    const opts = call![2] as { headers: Record<string, string>; retry?: string };
+    expect(opts.headers.authorization).toBe("Bearer session-tok");
+    // Static customer-profile token is NEVER used on the cards contract.
+    expect(JSON.stringify(opts.headers)).not.toContain("G5tmYwwRnpfPmtJ3HT7VYV7C4x86NGDz");
+    expect(opts.retry).toBe("safe");
+  });
+
+  it("cards: an API error propagates (no partial/guessed output)", async () => {
+    requestMock.mockImplementation((...args: unknown[]) => {
+      if (String(args[1] ?? "").endsWith("/cards")) return Promise.reject(new Error("boom-cards"));
+      return routeRequest(...args);
+    });
+    await expect(getCards()).rejects.toThrow(/boom-cards/);
   });
 });
 
@@ -1123,6 +1219,21 @@ describe("command --json output is clean end-to-end (poisoned API responses)", (
     parsed.forEach((d: object) => expectKeys(d, ["id", "name", "city"]));
   });
 
+  it("addresses use <known>: poisoned profile → allowlisted label only (id/name/city)", async () => {
+    const prevExit = process.exitCode;
+    try {
+      const out = await captureStdout(() => addressesUse("a1", { json: true }));
+      const parsed = JSON.parse(out);
+      assertClean(parsed);
+      expectKeys(parsed, ["id", "name", "city", "supported", "message"]);
+      expect(parsed.supported).toBe(false);
+      expect(parsed.id).toBe("a1");
+      expect(process.exitCode).toBe(EXIT_USAGE);
+    } finally {
+      process.exitCode = prevExit;
+    }
+  });
+
   it("slots: poisoned first-delivery-slots → clean SlotDTO[]", async () => {
     const out = await captureStdout(() => slotsCommand({ json: true }));
     const parsed = JSON.parse(out);
@@ -1159,5 +1270,79 @@ describe("command --json output is clean end-to-end (poisoned API responses)", (
     expectKeys(parsed, ["balance", "currency"]);
     expect(parsed.balance).toBe(12345);
     expect(parsed.currency).toBe("ZAR");
+  });
+
+  const CARD_KEYS = ["issuer", "maskedCardNumber", "expiryMonth", "expiryYear", "isDefault"];
+
+  it("cards --json: poisoned cards (token/cardholderName) → clean CardDTO[]", async () => {
+    const out = await captureStdout(() => cardsCommand({ json: true }));
+    const parsed = JSON.parse(out);
+    assertClean(parsed);
+    expect(parsed.length).toBeGreaterThan(0);
+    parsed.forEach((d: object) => expectKeys(d, CARD_KEYS));
+    const serialized = JSON.stringify(parsed);
+    expect(serialized).not.toContain("POISON_CARDHOLDER_NAME");
+    expect(serialized).not.toContain("POISON_CARDTOKEN");
+  });
+
+  it("cards table (human): poisoned response never prints token/cardholderName", async () => {
+    const out = await captureStdout(() => cardsCommand({}));
+    assertClean(out);
+    expect(out).not.toContain("POISON_CARDHOLDER_NAME");
+    expect(out).not.toContain("POISON_CARDTOKEN");
+    // The allowlisted issuer/masked fields DO render.
+    expect(out).toContain("VISA");
+    expect(out).toContain("•••• 0007");
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// addresses use <id> — CONSERVATIVE: validate id, NEVER dispatch a switch
+// ════════════════════════════════════════════════════════════════════════
+describe("addresses use <id> is conservative (no delivery-address switch)", () => {
+  /** Profile with one saved address, plus PII the DTO must drop. */
+  function profileWithAddress(...args: unknown[]) {
+    const url = String(args[1] ?? "");
+    if (url.includes("customer-profile/v2")) {
+      return ok({
+        userProfile: {
+          addresses: [{ _id: "a1", name: "Home", city: "Cape Town", ...POISON }],
+        },
+      });
+    }
+    return routeRequest(...args);
+  }
+
+  it("unknown id → UsageError (exit 2) and makes NO mutation (reads only)", async () => {
+    requestMock.mockImplementation(profileWithAddress);
+    let thrown: unknown;
+    try {
+      await addressesUse("NOT-MINE", { json: true });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(UsageError);
+    expect(classifyError(thrown).code).toBe(EXIT_USAGE);
+    // No write of any kind — every call the command made was a GET.
+    const methods = requestMock.mock.calls.map((c) => String(c[0]));
+    expect(methods.every((m) => m === "GET")).toBe(true);
+  });
+
+  it("known id → supported:false JSON (id/name/city only), exitCode 2, NO mutation", async () => {
+    requestMock.mockImplementation(profileWithAddress);
+    const prevExit = process.exitCode;
+    try {
+      const out = await captureStdout(() => addressesUse("a1", { json: true }));
+      const parsed = JSON.parse(out);
+      assertClean(parsed);
+      expectKeys(parsed, ["id", "name", "city", "supported", "message"]);
+      expect(parsed).toMatchObject({ id: "a1", name: "Home", city: "Cape Town", supported: false });
+      expect(typeof parsed.message).toBe("string");
+      expect(process.exitCode).toBe(EXIT_USAGE);
+      const methods = requestMock.mock.calls.map((c) => String(c[0]));
+      expect(methods.every((m) => m === "GET")).toBe(true);
+    } finally {
+      process.exitCode = prevExit;
+    }
   });
 });

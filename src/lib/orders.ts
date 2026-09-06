@@ -164,6 +164,19 @@ export interface AddressDTO {
 }
 
 /**
+ * A saved payment card. EXACTLY these five fields are emitted — the card
+ * `token` (a payment secret), `cardholderName` (PII), `cardHasBeenUsed` and
+ * `mostRecentlyUsed` are never mapped. No index signature.
+ */
+export interface CardDTO {
+  issuer: string | null;
+  maskedCardNumber: string | null;
+  expiryMonth: string | number | null;
+  expiryYear: string | number | null;
+  isDefault: boolean;
+}
+
+/**
  * Fulfilment mode. Three exist: `sixty-min` (small goods, ≈1hr) and `one-day`
  * (scheduled slot) are SLOT-based; `hyper` (large/bulk goods, Checkers Hyper)
  * uses a delivery ESTIMATE + minimum order value — a contract NOT yet captured,
@@ -371,6 +384,15 @@ interface RawAddress {
   city?: string;
 }
 
+/** Read-only view of a raw card naming ONLY the allowlisted fields. */
+interface RawCardView {
+  issuer?: string;
+  maskedCardNumber?: string;
+  expiryMonth?: string | number;
+  expiryYear?: string | number;
+  isDefault?: boolean;
+}
+
 // ─── Pure mappers (exported for redaction/shape tests) ───────────────────────
 
 export function mapOrderItem(raw: RawOrderItem): OrderItemDTO {
@@ -504,6 +526,22 @@ export function mapAddress(raw: RawAddress): AddressDTO {
     id: raw._id ?? raw.identifier ?? "",
     name: raw.name ?? "",
     city: raw.city ?? null,
+  };
+}
+
+export function mapCard(raw: RawCardView): CardDTO {
+  return {
+    issuer: typeof raw.issuer === "string" ? raw.issuer : null,
+    maskedCardNumber: typeof raw.maskedCardNumber === "string" ? raw.maskedCardNumber : null,
+    expiryMonth:
+      typeof raw.expiryMonth === "string" || typeof raw.expiryMonth === "number"
+        ? raw.expiryMonth
+        : null,
+    expiryYear:
+      typeof raw.expiryYear === "string" || typeof raw.expiryYear === "number"
+        ? raw.expiryYear
+        : null,
+    isDefault: raw.isDefault === true,
   };
 }
 
@@ -903,6 +941,13 @@ export async function getAddresses(
 ): Promise<AddressDTO[]> {
   const raw = (await api.getAddresses()) as unknown as RawAddress[];
   return raw.map(mapAddress);
+}
+
+export async function getCards(
+  api: CheckersAPI = new CheckersAPI()
+): Promise<CardDTO[]> {
+  const raw = (await api.getCards()) as unknown as RawCardView[];
+  return raw.map(mapCard);
 }
 
 export async function getSlots(

@@ -1,17 +1,20 @@
 import chalk from "chalk";
-import { CheckersAPI } from "../lib/api.js";
+import { getCards } from "../lib/orders.js";
 import { startSpinner } from "../lib/output.js";
 
 export interface CardsOptions {
   json?: boolean;
 }
 
+/**
+ * List saved payment cards. Only issuer + masked number + expiry + default flag
+ * are emitted — never the card token, cardholder name, or usage flags.
+ */
 export async function cards(options: CardsOptions = {}): Promise<void> {
   const { json = false } = options;
   const spinner = json ? null : startSpinner("Fetching cards…");
 
-  const api = new CheckersAPI();
-  const items = await api.getPaymentCards();
+  const items = await getCards();
   spinner?.stop();
 
   if (json) {
@@ -29,9 +32,11 @@ export async function cards(options: CardsOptions = {}): Promise<void> {
     const issuer = c.issuer ?? "Card";
     const masked = c.maskedCardNumber ?? "••••";
     const exp =
-      c.expiryMonth && c.expiryYear ? ` ${chalk.dim(`(exp ${c.expiryMonth}/${c.expiryYear})`)}` : "";
-    process.stdout.write(`  ${chalk.cyan("●")} ${issuer} ${masked}${exp}\n`);
-    if (c.token) process.stdout.write(`    ${chalk.dim(`token: ${c.token}`)}\n`);
+      c.expiryMonth && c.expiryYear
+        ? ` ${chalk.dim(`(exp ${c.expiryMonth}/${c.expiryYear})`)}`
+        : "";
+    const dflt = c.isDefault ? ` ${chalk.green("(default)")}` : "";
+    process.stdout.write(`  ${chalk.cyan("●")} ${issuer} ${masked}${exp}${dflt}\n`);
   }
   process.stdout.write("\n");
 }

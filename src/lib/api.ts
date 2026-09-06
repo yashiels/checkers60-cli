@@ -111,15 +111,6 @@ export interface Address {
   [key: string]: unknown;
 }
 
-export interface Card {
-  token?: string;
-  issuer?: string;
-  maskedCardNumber?: string;
-  expiryMonth?: string | number;
-  expiryYear?: string | number;
-  [key: string]: unknown;
-}
-
 export interface OrderTotal {
   cartTotal?: number;
   deliveryFee?: number;
@@ -249,6 +240,26 @@ export interface RawCustomerProfile {
   IsXtraSavingsCustomer?: boolean;
   xTraSavingsCardNumber?: string;
   account?: RawAccountBalances;
+}
+
+/**
+ * One saved payment card from `customers/{userId}/cards`. Only issuer, masked
+ * number, expiry and the default flag are ever mapped into a DTO. `token`,
+ * `cardholderName`, `cardHasBeenUsed` and `mostRecentlyUsed` are PII/secret and
+ * are typed here ONLY to document that orders.ts must never read them.
+ */
+export interface RawCard {
+  issuer?: string;
+  maskedCardNumber?: string;
+  expiryMonth?: string | number;
+  expiryYear?: string | number;
+  isDefault?: boolean;
+  /** Secret — never mapped into a DTO. */
+  token?: string;
+  /** PII — never mapped into a DTO. */
+  cardholderName?: string;
+  cardHasBeenUsed?: boolean;
+  mostRecentlyUsed?: boolean;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -708,20 +719,37 @@ export class CheckersAPI {
   }
 
   /**
-   * DEFERRED — the payment-cards contract (token, headers, host) was NOT
-   * exercised in the capture, so no guessed request ships. Re-enable once the
-   * real contract is observed.
+   * Saved payment cards. Captured contract: `GET {AUTH}/customers/{userId}/cards`
+   * with the Bearer SESSION token (the session token is in the header, not the
+   * path — so no sensitivePathTail/redirect handling). Returns the raw cards;
+   * orders.ts maps only the allowlisted issuer/masked/expiry/default fields —
+   * token/cardholderName never escape. `retry:"safe"` (a plain read).
    */
-  async getPaymentCards(): Promise<Card[]> {
-    throw new Error(
-      "Payment cards are not available in this version (endpoint contract unverified)."
+  async getCards(): Promise<RawCard[]> {
+    const session = await this.session();
+    const res = await request<{ cards?: RawCard[]; success?: boolean }>(
+      "GET",
+      `${CONFIG.AUTH_BASE}/customers/${encodeURIComponent(session.userId)}/cards`,
+      { headers: this.authHostHeaders(session), retry: "safe" }
     );
+    return res.data?.cards ?? [];
   }
 
   /** Customer-profile header set: Bearer static PROFILE_TOKEN + base app headers. */
   private profileHeaders(): Record<string, string> {
     return {
       authorization: `Bearer ${CONFIG.PROFILE_TOKEN}`,
+      channel: CONFIG.CHANNEL,
+      "app-version": CONFIG.APP_VERSION,
+      appversion: CONFIG.APP_VERSION_CODE,
+      "device-id": getDeviceId(),
+    };
+  }
+
+  /** Auth-host header set: Bearer SESSION token + base app headers (cards read). */
+  private authHostHeaders(session: SessionContext): Record<string, string> {
+    return {
+      authorization: `Bearer ${session.sessionToken}`,
       channel: CONFIG.CHANNEL,
       "app-version": CONFIG.APP_VERSION,
       appversion: CONFIG.APP_VERSION_CODE,
