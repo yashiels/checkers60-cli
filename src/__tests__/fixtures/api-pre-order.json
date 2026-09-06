@@ -1,47 +1,63 @@
 {
+  "success": true,
   "deliverySlots": {
-    "sixty-min-delivery": {
+    "cart-1": {
       "allowASAPDelivery": true,
       "slots": [
-        { "start": "2026-09-06T11:00:00+02:00", "end": "2026-09-06T12:00:00+02:00", "available": true }
-      ]
+        { "id": null, "start": "2026-09-06T14:00:00+02:00", "end": "2026-09-06T15:00:00+02:00", "displayName": "2-3 PM", "displayNameShort": "2-3 PM" },
+        { "id": null, "start": "2026-09-06T15:00:00+02:00", "end": "2026-09-06T16:00:00+02:00", "displayName": "3-4 PM", "displayNameShort": "3-4 PM" }
+      ],
+      "availableSlotCountToday": 2,
+      "availableSlotCountTomorrow": 0
     }
   },
-  "totals": {
-    "currency": "ZAR",
-    "subTotal": 18500,
-    "total": 22350,
-    "fees": [
-      { "code": "delivery", "name": "Delivery fee", "amount": 3500 },
-      { "code": "bag", "name": "Bag fee", "amount": 200 },
+  "detailedDeliveryFees": { "sixty-min-delivery": 3700 },
+  "payment": {
+    "availablePaymentMethods": [
       {
-        "code": "eco-bag",
-        "name": "Reusable bag levy",
-        "amount": 150,
-        "driverName": "POISON_DRIVER_NAME",
-        "email": "POISON_EMAIL@example.com"
-      }
+        "type": "ecentric-card",
+        "options": {
+          "cvvRequired": false,
+          "displayIdentifier": "POISON_CARD_4111",
+          "expiryMonth": "3",
+          "expiryYear": "2032",
+          "isDefault": true,
+          "issuer": "Visa",
+          "maskedCardNumber": "POISON_CARD_4111",
+          "token": "POISON_PAYTOKEN",
+          "cardholderName": "POISON_DRIVER_NAME"
+        }
+      },
+      { "type": "stitch-capitec-pay" }
     ],
-    "minimumOrderValue": 35000,
-    "minimumOrderMet": false,
-    "violations": [
-      { "message": "Order is below the R350.00 minimum for delivery.", "driverPhone": "POISON_PHONE_0821112222" }
+    "enabledPaymentMethods": [{ "type": "ecentric-card" }, { "type": "stitch-capitec-pay" }],
+    "paymentOptions": [
+      { "type": "ecentric-card", "options": { "token": "POISON_PAYTOKEN", "maskedCardNumber": "POISON_CARD_4111" } }
     ],
-    "quoteId": "PREORDER-Q-0001",
-    "expiresAt": "2026-09-06T11:15:00+02:00",
-    "driver": {
-      "name": "POISON_DRIVER_NAME",
-      "phone": "POISON_PHONE_0821112222",
-      "location": { "lat": 12.345678, "lng": 98.765432 }
-    },
-    "address": {
-      "unit": "POISON_UNIT_42",
-      "street": "POISON_STREET",
-      "suburb": "POISON_SUBURB",
-      "fullAddress": "POISON_FULL_ADDRESS"
-    },
-    "payment": { "token": "POISON_PAYTOKEN", "maskedCardNumber": "POISON_CARD_4111" },
-    "xtraSavingsAccessToken": "POISON_XS_ACCESS",
+    "availableWalletBalance": 0
+  },
+  "totals": {
+    "priceFactor": 100,
+    "cartTotal": 20396,
+    "medicalAidCover": 0,
+    "discountTotal": 4900,
+    "deliveryDiscountTotal": 0,
+    "deliveryFee": 3700,
+    "qualifyingSpendPromotion": 0,
+    "totalOwing": 20196,
+    "creditApplied": 0,
+    "accountCreditApplied": 0,
+    "lostDealCreditApplied": 0,
+    "serviceGuaranteeCreditApplied": 0,
+    "voucherCreditApplied": 0,
+    "xtraSavingsPlusCreditApplied": 0,
+    "totalPayable": 19196,
+    "requiresCardPayment": true,
+    "amountToAuthorize": 20196,
+    "tipAmount": 1000,
+    "amountToPayOnUpdate": 0,
+    "appliedDiscountCodesTotal": 0,
+    "driver": { "name": "POISON_DRIVER_NAME", "phone": "POISON_PHONE_0821112222" },
     "email": "POISON_EMAIL@example.com",
     "arbitraryUnknown": "POISON_UNKNOWN"
   }

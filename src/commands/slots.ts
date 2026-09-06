@@ -33,8 +33,12 @@ export async function slots(options: SlotsOptions = {}): Promise<void> {
 
   const spinner = json ? null : startSpinner("Fetching delivery slots…");
 
-  const items = await getSlots(mode);
-  spinner?.stop();
+  let items;
+  try {
+    items = await getSlots(mode);
+  } finally {
+    spinner?.stop();
+  }
 
   if (json) {
     process.stdout.write(`${JSON.stringify(items, null, 2)}\n`);

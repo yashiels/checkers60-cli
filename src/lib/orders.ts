@@ -10,7 +10,9 @@ import {
   type RawFirstDeliverySlots,
   type RawMissedDiscount,
   type RawOrderItem,
+  type RawPreOrderSlot,
   type RawUserProductScore,
+  type PreOrderResult,
 } from "./api.js";
 import { CONFIG, type StoreContext } from "./config.js";
 
@@ -260,69 +262,56 @@ export interface FeeLineDTO {
   amount: number;
 }
 
-/** Minimum-order status for the previewed cart. Amounts are cents. */
-export interface MinimumOrderDTO {
-  /** Minimum order value required, or null when not reported. */
-  value: number | null;
-  /** True/false when known (explicit server flag preferred, else derived), null otherwise. */
-  met: boolean | null;
-  /** Amount still needed to reach the minimum, or null. */
-  shortfall: number | null;
-}
-
-/**
- * Informational selection block for `checkout --preview`. Delivery slot and
- * driver tip are CLIENT-TRANSIENT — chosen in the app at place-order time and
- * NOT persisted by this read-only CLI — so these are examples only:
- * `deliverySlots` are the first-available slots per mode (from
- * `first-delivery-slots`, cart-independent, `CONFIG.DEFAULT_STORES`), already
- * allowlisted `SlotDTO`s; `tipPresetsCents` are the app's fixed preset amounts;
- * `customTipAllowed` reflects that a custom amount is also selectable in the app.
- */
-export interface CheckoutSelectionInfoDTO {
-  /** Plain-language note that slot + tip are chosen in the app, not stored here. */
-  note: string;
-  /** First-available delivery slots per mode (informational examples). */
-  deliverySlots: SlotDTO[];
-  /** Example driver-tip preset amounts in cents (the app's fixed presets). */
-  tipPresetsCents: number[];
-  /** Whether a custom tip amount is also selectable in the app. */
-  customTipAllowed: boolean;
+/** One delivery slot offered for the previewed cart (pre-order). No PII. */
+export interface PreviewSlotDTO {
+  /** ISO-8601 slot start, or null. */
+  from: string | null;
+  /** ISO-8601 slot end, or null. */
+  to: string | null;
+  /** Human slot label (e.g. "2-3 PM"), or null. */
+  displayName: string | null;
 }
 
 /**
  * `checkout --preview` output: a READ-ONLY totals preview for the current
- * populated cart, derived from the existing pre-order response
- * (`getDeliverySlots().totals`), plus an informational `selectionInfo` block
- * (delivery-slot examples + tip presets — never a place-order/tip/payment write).
- *
- * The pre-order `totals` wire shape is NOT captured in this app version, so the
- * mapper reads a best-effort set of field-name candidates and the fee breakdown
- * is best-effort; every value stays inside the DTO-allowlist boundary (fields
- * copied explicitly, no spreads, no raw passthrough) and money is integer cents.
- * An empty cart (pre-order returns no totals) yields `populated: false` and a
- * guidance `message` — never an error or a guessed total.
+ * populated cart, derived from the captured pre-order response. Money is in
+ * integer CENTS (the pre-order `totals` convention — unlike the RAND figures
+ * `first-delivery-slots` reports). Every value stays inside the DTO-allowlist
+ * boundary: fields are copied explicitly by name (no spreads, no raw
+ * passthrough), and the pre-order's payment block is reduced to method-type
+ * strings — card tokens, PANs and cardholder names never escape. An empty cart
+ * (pre-order returns no totals) yields `populated: false` and a guidance
+ * `message`; a persistent server 400 throws (never a fake-empty preview).
  */
 export interface CheckoutPreviewDTO {
   preview: true;
   /** False when the cart is empty (pre-order returned no totals). */
   populated: boolean;
   currency: string;
-  /** Goods subtotal in cents, or null. */
+  /** Goods subtotal in cents (`totals.cartTotal`), or null. */
   subtotal: number | null;
-  /** Total payable in cents, or null. */
+  /** Discount already applied in cents (`totals.discountTotal`), or null. */
+  discountTotal: number | null;
+  /** Delivery fee in cents (`totals.deliveryFee`), or null. */
+  deliveryFee: number | null;
+  /** Driver tip already applied in cents (`totals.tipAmount`), or null. */
+  tipAmount: number | null;
+  /** Total owing in cents (`totals.totalOwing`), or null. */
+  totalOwing: number | null;
+  /** Total payable in cents (`totals.totalPayable`), or null. */
   total: number | null;
-  /** Complete fee breakdown (known + passed-through unknown categories), cents. */
+  /** Per-service-option delivery fee breakdown in cents (`detailedDeliveryFees`). */
   fees: FeeLineDTO[];
-  minimumOrder: MinimumOrderDTO;
-  /** Server validation messages (strings only — never a PII-bearing object). */
-  violations: string[];
-  /** Quote/pre-order id when the response carries one. */
-  quoteId: string | null;
-  /** Quote expiry as ISO-8601 when present and valid. */
-  quoteExpiry: string | null;
-  /** Informational slot/tip examples — selected in the app, never stored here. */
-  selectionInfo: CheckoutSelectionInfoDTO;
+  /** Whether ASAP delivery is available for the cart. */
+  allowASAPDelivery: boolean;
+  /** Delivery slots offered for the cart (from the pre-order response). */
+  deliverySlots: PreviewSlotDTO[];
+  /** Payment METHOD-TYPE ids only (e.g. "ecentric-card") — never card details. */
+  availablePaymentMethods: string[];
+  /** Example driver-tip presets in cents — tip is chosen in the app, not stored. */
+  tipPresetsCents: number[];
+  /** Plain-language note that slot + tip are chosen in the app, not stored here. */
+  note: string;
   /** Guidance for the empty-cart case; null when totals are present. */
   message: string | null;
 }
@@ -335,20 +324,6 @@ export const CHECKOUT_TIP_PRESETS_CENTS: readonly number[] = [1000, 2000, 3000, 
 
 export const CHECKOUT_SELECTION_NOTE =
   "Delivery slot and driver tip are selected in the app when you pay — this CLI does not store them.";
-
-/**
- * Build the informational selection block. `deliverySlots` are already
- * allowlisted `SlotDTO`s; the tip presets are fixed constants copied into a
- * fresh array so the exported constant can never be mutated by a caller.
- */
-export function buildCheckoutSelectionInfo(slots: SlotDTO[]): CheckoutSelectionInfoDTO {
-  return {
-    note: CHECKOUT_SELECTION_NOTE,
-    deliverySlots: slots,
-    tipPresetsCents: [...CHECKOUT_TIP_PRESETS_CENTS],
-    customTipAllowed: true,
-  };
-}
 /**
  * One cart line that qualifies for a bonus-buy deal. Membership only — its
  * presence never implies the deal's buy-threshold is met.
@@ -648,11 +623,11 @@ export function mapWallet(raw: RawCustomerProfile): WalletDTO {
   };
 }
 
-// ── checkout preview mapper (pre-order totals → allowlisted DTO) ─────────────
-// The `totals` wire shape is uncaptured, so every value is pulled by explicit
-// candidate key (never a spread), money is coerced to integer cents, and the
-// raw envelope is never passed through. Fee/violation entries copy only their
-// allowlisted sub-fields so PII in unexpected keys cannot escape.
+// ── checkout preview mapper (pre-order response → allowlisted DTO) ────────────
+// Every value is pulled by explicit key (never a spread), money is coerced to
+// integer cents, and the raw envelope is never passed through. The payment
+// block is reduced to method-type strings so card tokens/PANs/holder names in
+// its nested `options` can never escape.
 
 /**
  * Read a value as integer minor units (cents). The app's money convention is
@@ -680,130 +655,86 @@ function firstString(obj: Record<string, unknown>, keys: string[]): string | nul
   return null;
 }
 
-function firstBool(obj: Record<string, unknown>, keys: string[]): boolean | null {
-  for (const k of keys) {
-    if (typeof obj[k] === "boolean") return obj[k] as boolean;
-  }
-  return null;
-}
-
-const SUBTOTAL_KEYS = ["subTotal", "subtotal", "cartTotal", "itemsTotal"];
-const TOTAL_KEYS = ["total", "totalOwing", "grandTotal", "amountDue", "totalToPay"];
-const FEE_ARRAY_KEYS = ["fees", "feeBreakdown", "charges", "additionalFees"];
-const VIOLATION_KEYS = ["violations", "validationErrors", "errors", "messages"];
-
-/** Known scalar fee fields, used only when no fee array is present. */
-const FEE_SCALARS: { name: string; keys: string[] }[] = [
-  { name: "Delivery fee", keys: ["deliveryFee"] },
-  { name: "Bag fee", keys: ["bagFee"] },
-  { name: "Packaging fee", keys: ["packagingFee"] },
-  { name: "Service fee", keys: ["serviceFee"] },
-];
-
-function mapFeeLine(entry: unknown): FeeLineDTO | null {
-  if (!entry || typeof entry !== "object") return null;
-  const o = entry as Record<string, unknown>;
-  const amount = firstCents(o, ["amount", "value", "fee", "price"]);
-  if (amount === null) return null;
-  const name = firstString(o, ["name", "label", "description", "displayName"]) ?? "Fee";
-  return { name, amount };
-}
-
 /**
- * Complete fee breakdown. The FIRST field that is genuinely an array wins — even
- * an empty one suppresses the scalar fallback, so a server that itemizes fees is
- * never double-counted against the known scalar fields.
+ * Per-service-option delivery fees (`detailedDeliveryFees`, e.g.
+ * `{"sixty-min-delivery": 3700}`) as cents fee lines. Only integer-cents values
+ * are kept; the service-option key is the label.
  */
-function extractFees(totals: Record<string, unknown>): FeeLineDTO[] {
-  for (const k of FEE_ARRAY_KEYS) {
-    const arr = totals[k];
-    if (Array.isArray(arr)) {
-      return arr.map(mapFeeLine).filter((f): f is FeeLineDTO => f !== null);
-    }
-  }
+function extractDeliveryFees(fees: Record<string, unknown> | undefined): FeeLineDTO[] {
+  if (!fees || typeof fees !== "object") return [];
   const lines: FeeLineDTO[] = [];
-  for (const s of FEE_SCALARS) {
-    const amount = firstCents(totals, s.keys);
-    if (amount !== null) lines.push({ name: s.name, amount });
+  for (const [name, value] of Object.entries(fees)) {
+    const amount = toCents(value);
+    if (amount !== null) lines.push({ name, amount });
   }
   return lines;
 }
 
-function mapMinimumOrder(
-  totals: Record<string, unknown>,
-  subtotal: number | null
-): MinimumOrderDTO {
-  const value = firstCents(totals, ["minimumOrderValue", "minOrderValue", "minimumOrder"]);
-  const explicit = firstBool(totals, ["minimumOrderMet", "meetsMinimumOrder", "minOrderMet"]);
-  let met: boolean | null = explicit;
-  if (met === null && value !== null && subtotal !== null) met = subtotal >= value;
-  let shortfall: number | null = null;
-  if (met === false && value !== null && subtotal !== null) {
-    const diff = value - subtotal;
-    // Keep every emitted money value a safe integer (both inputs already are).
-    shortfall = Number.isSafeInteger(diff) ? Math.max(0, diff) : null;
-  }
-  return { value, met, shortfall };
-}
-
-function violationMessage(entry: unknown): string | null {
-  if (typeof entry === "string") return entry.trim().length > 0 ? entry.trim() : null;
-  if (entry && typeof entry === "object") {
-    return firstString(entry as Record<string, unknown>, [
-      "message",
-      "reason",
-      "description",
-      "text",
-    ]);
-  }
-  return null;
-}
-
-function extractViolations(totals: Record<string, unknown>): string[] {
-  for (const k of VIOLATION_KEYS) {
-    const arr = totals[k];
-    if (Array.isArray(arr)) {
-      return arr.map(violationMessage).filter((s): s is string => s !== null);
-    }
-  }
-  return [];
-}
-
-function mapQuoteExpiry(totals: Record<string, unknown>): string | null {
-  for (const k of ["expiresAt", "expiryTime", "quoteExpiry", "expiry"]) {
-    const v = totals[k];
-    if (typeof v === "number" && Number.isFinite(v)) return new Date(v).toISOString();
-    if (typeof v === "string") {
-      const t = v.trim();
-      const ms = Date.parse(t);
-      // Require an actual ISO-8601 datetime — never pass an arbitrary string through.
-      if (/^\d{4}-\d{2}-\d{2}T/.test(t) && !Number.isNaN(ms)) return new Date(ms).toISOString();
-    }
-  }
-  return null;
+/** Allowlisted preview slots: start/end/displayName only (pre-order slots carry no PII). */
+function extractPreviewSlots(slots: RawPreOrderSlot[]): PreviewSlotDTO[] {
+  return slots.map((s) => ({
+    from: typeof s.start === "string" ? s.start : null,
+    to: typeof s.end === "string" ? s.end : null,
+    displayName:
+      typeof s.displayName === "string"
+        ? s.displayName
+        : typeof s.displayNameShort === "string"
+          ? s.displayNameShort
+          : null,
+  }));
 }
 
 /**
- * Map a populated pre-order `totals` envelope to the allowlisted preview DTO.
- * `slots` (optional) are the informational first-available delivery slots — they
- * only ever enter through the already-allowlisted `SlotDTO` mapper, never raw.
+ * The payment block reduced to its METHOD-TYPE strings only (e.g.
+ * "ecentric-card"). The nested `options` object carries masked PANs, issuer,
+ * expiry and other card detail — none of which is read here, so no card
+ * information can escape through the preview. De-duplicated, order preserved.
  */
-export function mapCheckoutPreview(totals: unknown, slots: SlotDTO[] = []): CheckoutPreviewDTO {
-  const t = (totals && typeof totals === "object" ? totals : {}) as Record<string, unknown>;
-  const subtotal = firstCents(t, SUBTOTAL_KEYS);
-  const total = firstCents(t, TOTAL_KEYS);
+function extractPaymentMethods(payment: unknown): string[] {
+  if (!payment || typeof payment !== "object") return [];
+  const arr = (payment as { availablePaymentMethods?: unknown }).availablePaymentMethods;
+  if (!Array.isArray(arr)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of arr) {
+    const type =
+      entry && typeof entry === "object"
+        ? (entry as { type?: unknown }).type
+        : entry;
+    if (typeof type === "string" && type.length > 0 && !seen.has(type)) {
+      seen.add(type);
+      out.push(type);
+    }
+  }
+  return out;
+}
+
+/**
+ * Map a populated pre-order response to the allowlisted preview DTO. Every money
+ * field is integer cents, read by explicit key; slots and payment methods enter
+ * only through their allowlisting extractors (never raw).
+ */
+export function mapCheckoutPreview(pre: PreOrderResult): CheckoutPreviewDTO {
+  const t = (pre.totals && typeof pre.totals === "object" ? pre.totals : {}) as Record<
+    string,
+    unknown
+  >;
   return {
     preview: true,
     populated: true,
     currency: firstString(t, ["currency", "currencyCode"]) ?? "ZAR",
-    subtotal,
-    total,
-    fees: extractFees(t),
-    minimumOrder: mapMinimumOrder(t, subtotal),
-    violations: extractViolations(t),
-    quoteId: firstString(t, ["quoteId", "preOrderId"]),
-    quoteExpiry: mapQuoteExpiry(t),
-    selectionInfo: buildCheckoutSelectionInfo(slots),
+    subtotal: firstCents(t, ["cartTotal"]),
+    discountTotal: firstCents(t, ["discountTotal"]),
+    deliveryFee: firstCents(t, ["deliveryFee"]),
+    tipAmount: firstCents(t, ["tipAmount"]),
+    totalOwing: firstCents(t, ["totalOwing"]),
+    total: firstCents(t, ["totalPayable", "totalOwing"]),
+    fees: extractDeliveryFees(pre.detailedDeliveryFees),
+    allowASAPDelivery: pre.asap === true,
+    deliverySlots: extractPreviewSlots(pre.slots ?? []),
+    availablePaymentMethods: extractPaymentMethods(pre.payment),
+    tipPresetsCents: [...CHECKOUT_TIP_PRESETS_CENTS],
+    note: CHECKOUT_SELECTION_NOTE,
     message: null,
   };
 }
@@ -815,13 +746,17 @@ export function emptyCheckoutPreview(): CheckoutPreviewDTO {
     populated: false,
     currency: "ZAR",
     subtotal: null,
+    discountTotal: null,
+    deliveryFee: null,
+    tipAmount: null,
+    totalOwing: null,
     total: null,
     fees: [],
-    minimumOrder: { value: null, met: null, shortfall: null },
-    violations: [],
-    quoteId: null,
-    quoteExpiry: null,
-    selectionInfo: buildCheckoutSelectionInfo([]),
+    allowASAPDelivery: false,
+    deliverySlots: [],
+    availablePaymentMethods: [],
+    tipPresetsCents: [...CHECKOUT_TIP_PRESETS_CENTS],
+    note: CHECKOUT_SELECTION_NOTE,
     message: CHECKOUT_EMPTY_CART_MESSAGE,
   };
 }
@@ -1055,28 +990,22 @@ export async function getWallet(
 }
 
 /**
- * Read-only checkout totals preview for the current populated cart. Reuses the
- * existing pre-order call (`getDeliverySlots`) UNCHANGED for `totals`, then adds
- * one further read-only lookup (`first-delivery-slots`) for the informational
- * slot examples — no place-order, no cart mutation. The slot lookup is best
- * effort: if it fails, the totals preview still returns with `deliverySlots: []`
- * rather than losing an otherwise-valid preview. An empty cart (no totals)
- * yields the empty-cart preview and skips the slot lookup entirely.
+ * Read-only checkout totals preview for the current populated cart, from the
+ * captured pre-order response (`getDeliverySlots`) — totals, per-cart delivery
+ * slots, delivery fees and available payment methods, all read-only (no
+ * place-order, no cart mutation). An empty cart (no totals) yields the
+ * empty-cart preview. A persistent server error (e.g. 400) PROPAGATES as a typed
+ * error — it is never swallowed into a fake-empty preview.
  */
 export async function getCheckoutPreview(
   api: CheckersAPI = new CheckersAPI()
 ): Promise<CheckoutPreviewDTO> {
-  const { totals } = await api.getDeliverySlots();
+  const pre = await api.getDeliverySlots();
+  const { totals } = pre;
   if (!totals || typeof totals !== "object" || Object.keys(totals).length === 0) {
     return emptyCheckoutPreview();
   }
-  let slots: SlotDTO[] = [];
-  try {
-    slots = await getSlots(undefined, api);
-  } catch {
-    slots = [];
-  }
-  return mapCheckoutPreview(totals, slots);
+  return mapCheckoutPreview(pre);
 }
 
 // ── cart deal awareness (savings) ────────────────────────────────────────────

@@ -76,7 +76,6 @@ import {
   mapCheckoutPreview,
   emptyCheckoutPreview,
   getCheckoutPreview,
-  buildCheckoutSelectionInfo,
   CHECKOUT_EMPTY_CART_MESSAGE,
   CHECKOUT_TIP_PRESETS_CENTS,
   CHECKOUT_SELECTION_NOTE,
@@ -95,6 +94,8 @@ import {
   getWallet,
 } from "../lib/orders.js";
 import { classifyError, UsageError, EXIT_USAGE } from "../lib/errors.js";
+import { APIError } from "../lib/api.js";
+import { CONFIG } from "../lib/config.js";
 import { initRuntime, resetRuntimeForTests } from "../lib/runtime.js";
 import { regulars as regularsCommand } from "../commands/regulars.js";
 import { reorder as reorderCommand } from "../commands/reorder.js";
@@ -675,6 +676,65 @@ describe("real fixtures parse to allowlisted DTOs", () => {
     expect(dtos.every((d) => d.mode === "sixty-min-delivery")).toBe(true);
   });
 
+  it("first-delivery-slots request: POST ?ignoreCarts=true with a BARE per-store array", async () => {
+    await getSlots(undefined);
+    const call = requestMock.mock.calls.find((c) => String(c[1]).includes("/first-delivery-slots"));
+    expect(call).toBeDefined();
+    const [method, url, opts] = call as [string, string, { json?: unknown }];
+    expect(method).toBe("POST");
+    expect(url).toContain("/api/v3/first-delivery-slots?ignoreCarts=true");
+    // BARE ARRAY (not { storeContexts }), one entry per store, field servedServiceOptions.
+    expect(Array.isArray(opts.json)).toBe(true);
+    const body = opts.json as Array<{ storeId: string; servedServiceOptions: string[] }>;
+    expect(body.length).toBe(CONFIG.DEFAULT_STORES.length);
+    body.forEach((entry, i) => {
+      expect(Object.keys(entry).sort()).toEqual(["servedServiceOptions", "storeId"]);
+      expect(entry.storeId).toBe(CONFIG.DEFAULT_STORES[i].storeId);
+      expect(entry.servedServiceOptions).toEqual(CONFIG.DEFAULT_STORES[i].serviceOptionIds);
+    });
+  });
+
+  it("first-delivery-slots deliveryFee/minimumOrderValue are RAND (as reported)", async () => {
+    const dtos = await getSlots("sixty-min");
+    const sixty = dtos.find((d) => d.mode === "sixty-min-delivery");
+    // Fixture reports RAND figures (37, 150) — passed through, NOT re-scaled to cents.
+    expect(sixty?.deliveryFee).toBe(37);
+    expect(sixty?.minimumOrderValue).toBe(150);
+  });
+
+  it("slots: a persistent 400 THROWS a typed error — never an empty slot list", async () => {
+    requestMock.mockImplementation((...args: unknown[]) => {
+      if (String(args[1] ?? "").includes("/first-delivery-slots")) {
+        return Promise.reject(new APIError(400, "Bad Request", '{"message":"Invalid Request"}', "first-delivery-slots"));
+      }
+      return routeRequest(...args);
+    });
+    await expect(getSlots(undefined)).rejects.toBeInstanceOf(APIError);
+  });
+
+  it("slots command on a 400 throws a typed non-zero error and prints no 'No delivery slots available'", async () => {
+    requestMock.mockImplementation((...args: unknown[]) => {
+      if (String(args[1] ?? "").includes("/first-delivery-slots")) {
+        return Promise.reject(new APIError(400, "Bad Request", "", "first-delivery-slots"));
+      }
+      return routeRequest(...args);
+    });
+    let thrown: unknown;
+    const out = await captureStdout(async () => {
+      try {
+        await slotsCommand({});
+      } catch (err) {
+        thrown = err;
+      }
+    });
+    expect(thrown).toBeInstanceOf(APIError);
+    const c = classifyError(thrown);
+    expect(c.code).not.toBe(0);
+    expect(c.status).toBe(400);
+    // The genuine-empty message must NEVER appear on a 400.
+    expect(out).not.toContain("No delivery slots available");
+  });
+
   it("favourites: empty fixture → []", async () => {
     const dtos = await getFavourites();
     expect(dtos).toEqual([]);
@@ -834,27 +894,39 @@ const CHECKOUT_KEYS = [
   "populated",
   "currency",
   "subtotal",
+  "discountTotal",
+  "deliveryFee",
+  "tipAmount",
+  "totalOwing",
   "total",
   "fees",
-  "minimumOrder",
-  "violations",
-  "quoteId",
-  "quoteExpiry",
-  "selectionInfo",
+  "allowASAPDelivery",
+  "deliverySlots",
+  "availablePaymentMethods",
+  "tipPresetsCents",
+  "note",
   "message",
 ];
 
-const SELECTION_INFO_KEYS = ["note", "deliverySlots", "tipPresetsCents", "customTipAllowed"];
-const SLOT_KEYS = [
-  "mode",
-  "storeId",
-  "from",
-  "to",
-  "available",
-  "asap",
-  "deliveryFee",
-  "minimumOrderValue",
-];
+const PREVIEW_SLOT_KEYS = ["from", "to", "displayName"];
+
+/** Build the parsed PreOrderResult (as api.getDeliverySlots returns) from a raw pre-order fixture. */
+function preResult(fixture: {
+  deliverySlots: Record<string, { allowASAPDelivery?: boolean; slots?: unknown[] }>;
+  detailedDeliveryFees?: unknown;
+  payment?: unknown;
+  totals?: unknown;
+}) {
+  const cart = Object.values(fixture.deliverySlots)[0] ?? {};
+  return {
+    slots: (cart.slots ?? []) as never,
+    asap: cart.allowASAPDelivery === true,
+    totals: fixture.totals as never,
+    detailedDeliveryFees: fixture.detailedDeliveryFees as never,
+    payment: fixture.payment,
+    raw: fixture,
+  };
+}
 
 /** Route `/carts/user` + `/orders/pre-order` for a populated checkout preview. */
 function checkoutRouter(...args: unknown[]) {
@@ -877,38 +949,43 @@ describe("checkout --preview surfaces pre-order totals", () => {
     expect(requestMock).not.toHaveBeenCalled();
   });
 
-  it("mapCheckoutPreview maps money as integer cents and preserves the UNKNOWN fee", () => {
-    const dto = mapCheckoutPreview(preOrderFixture.totals);
+  it("mapCheckoutPreview maps the captured totals as integer CENTS", () => {
+    const dto = mapCheckoutPreview(preResult(preOrderFixture));
     expectKeys(dto, CHECKOUT_KEYS);
     expect(dto.populated).toBe(true);
-    expect(dto.subtotal).toBe(18500);
-    expect(dto.total).toBe(22350);
     expect(dto.currency).toBe("ZAR");
-    // Every fee is name + amount ONLY, amount an integer (never a float on money).
-    dto.fees.forEach((f) => {
-      expectKeys(f, ["name", "amount"]);
-      expect(Number.isInteger(f.amount)).toBe(true);
+    // Every money field an integer cents value read by explicit key.
+    expect(dto.subtotal).toBe(20396);
+    expect(dto.discountTotal).toBe(4900);
+    expect(dto.deliveryFee).toBe(3700);
+    expect(dto.tipAmount).toBe(1000);
+    expect(dto.totalOwing).toBe(20196);
+    expect(dto.total).toBe(19196);
+    [dto.subtotal, dto.deliveryFee, dto.tipAmount, dto.total].forEach((v) =>
+      expect(Number.isInteger(v)).toBe(true)
+    );
+  });
+
+  it("mapCheckoutPreview maps detailedDeliveryFees, slots and payment methods", () => {
+    const dto = mapCheckoutPreview(preResult(preOrderFixture));
+    // Per-service-option fee breakdown (cents).
+    expect(dto.fees).toEqual([{ name: "sixty-min-delivery", amount: 3700 }]);
+    // Slots carry only from/to/displayName.
+    expect(dto.allowASAPDelivery).toBe(true);
+    expect(dto.deliverySlots.length).toBe(2);
+    dto.deliverySlots.forEach((s) => expectKeys(s, PREVIEW_SLOT_KEYS));
+    expect(dto.deliverySlots[0]).toEqual({
+      from: "2026-09-06T14:00:00+02:00",
+      to: "2026-09-06T15:00:00+02:00",
+      displayName: "2-3 PM",
     });
-    // The unknown "eco-bag" category is NOT dropped — name + amount survive.
-    const eco = dto.fees.find((f) => f.name === "Reusable bag levy");
-    expect(eco).toBeDefined();
-    expect(eco).toEqual({ name: "Reusable bag levy", amount: 150 });
-    // Minimum-order status.
-    expect(dto.minimumOrder).toEqual({ value: 35000, met: false, shortfall: 16500 });
-    // Quote id + expiry surfaced (expiry normalized to ISO-8601).
-    expect(dto.quoteId).toBe("PREORDER-Q-0001");
-    expect(dto.quoteExpiry).toBe(new Date("2026-09-06T11:15:00+02:00").toISOString());
-    expect(dto.violations.length).toBe(1);
+    // Payment METHOD TYPES only — never the card details in `options`.
+    expect(dto.availablePaymentMethods).toEqual(["ecentric-card", "stitch-capitec-pay"]);
   });
 
-  it("mapCheckoutPreview drops ALL PII/secrets (poison totals)", () => {
-    const dto = mapCheckoutPreview(preOrderFixture.totals);
+  it("mapCheckoutPreview drops ALL PII/secrets (poison pre-order: card token/PAN/holder)", () => {
+    const dto = mapCheckoutPreview(preResult(preOrderFixture));
     assertClean(dto);
-  });
-
-  it("empty array of fees suppresses scalar-fee fallback (no double-count)", () => {
-    const dto = mapCheckoutPreview({ subTotal: 100, total: 100, fees: [], deliveryFee: 3500 });
-    expect(dto.fees).toEqual([]);
   });
 
   it("with --preview + populated cart: emits a clean totals DTO end-to-end", async () => {
@@ -918,11 +995,76 @@ describe("checkout --preview surfaces pre-order totals", () => {
     assertClean(parsed);
     expectKeys(parsed, CHECKOUT_KEYS);
     expect(parsed.populated).toBe(true);
-    expect(parsed.total).toBe(22350);
-    expect(parsed.fees.some((f: { name: string }) => f.name === "Reusable bag levy")).toBe(true);
-    // The pre-order call WAS made (totals derive from it) — no new endpoint.
+    expect(parsed.total).toBe(19196);
+    expect(parsed.deliverySlots.length).toBe(2);
+    // The pre-order call WAS made (totals derive from it).
     const urls = requestMock.mock.calls.map((c) => String(c[1]));
     expect(urls.some((u) => u.includes("/orders/pre-order"))).toBe(true);
+  });
+
+  it("pre-order request: application/json (NOT form) with the enriched app body", async () => {
+    requestMock.mockImplementation(checkoutRouter);
+    await getCheckoutPreview();
+    const call = requestMock.mock.calls.find((c) => String(c[1]).includes("/orders/pre-order"));
+    expect(call).toBeDefined();
+    const [method, url, opts] = call as [
+      string,
+      string,
+      { json?: Record<string, unknown>; form?: unknown },
+    ];
+    expect(method).toBe("POST");
+    expect(url).toContain("/api/v3/orders/pre-order");
+    // Primary fix: JSON body, never the form-urlencoded quirk.
+    expect(opts.form).toBeUndefined();
+    expect(opts.json).toBeDefined();
+    const body = opts.json as {
+      cartsInfo: Array<{
+        cartId: string;
+        driverTipAmount: number;
+        cart: Record<string, unknown>;
+      }>;
+      xsPlusMemberStatus: string;
+      storeContexts: unknown[];
+    };
+    expect(body.xsPlusMemberStatus).toBeTypeOf("string");
+    expect(Array.isArray(body.storeContexts)).toBe(true);
+    const info = body.cartsInfo[0];
+    expect(info.cartId).toBe("cart-1");
+    expect(info.driverTipAmount).toBe(0);
+    const cart = info.cart as {
+      replacementOptions: unknown[];
+      deliverySlot: unknown;
+      paymentCard: unknown;
+      stores: unknown[];
+      lineItemTotals: unknown;
+      cartSavings: unknown;
+      maximumCartSize: number;
+      warning: unknown;
+      lineItems: Array<Record<string, unknown>>;
+    };
+    // FIXED 7-item replacement-options list.
+    expect(cart.replacementOptions.length).toBe(7);
+    expect((cart.replacementOptions as Array<{ code: string }>).map((o) => o.code)).toEqual([
+      "replace-with",
+      "best-match",
+      "picker-decision",
+      "refund",
+      "alternative-replace",
+      "alternative-dont-replace",
+      "alternative-not-selected",
+    ]);
+    expect(cart.deliverySlot).toEqual({});
+    expect(cart.paymentCard).toBeNull();
+    expect(cart.stores).toEqual([]);
+    expect(cart.maximumCartSize).toBe(35);
+    expect(cart.warning).toEqual({});
+    expect(cart.lineItemTotals).toBeDefined();
+    expect(cart.cartSavings).toBeDefined();
+    // Each line item carries availableForDelivery + ranged.
+    cart.lineItems.forEach((li) => {
+      expect(li).toHaveProperty("availableForDelivery");
+      expect(li.ranged).toBe(true);
+    });
   });
 
   it("empty cart: populated=false + guidance message, and NO pre-order request", async () => {
@@ -937,149 +1079,107 @@ describe("checkout --preview surfaces pre-order totals", () => {
     expect(parsed.populated).toBe(false);
     expect(parsed.total).toBeNull();
     expect(parsed.fees).toEqual([]);
+    expect(parsed.deliverySlots).toEqual([]);
     expect(parsed.message).toBe(CHECKOUT_EMPTY_CART_MESSAGE);
     const urls = requestMock.mock.calls.map((c) => String(c[1]));
     expect(urls.some((u) => u.includes("/orders/pre-order"))).toBe(false);
   });
 
-  it("emptyCheckoutPreview is the fixed empty-cart shape (static selection info, no slots)", () => {
+  it("emptyCheckoutPreview is the fixed empty-cart shape", () => {
     expect(emptyCheckoutPreview()).toEqual({
       preview: true,
       populated: false,
       currency: "ZAR",
       subtotal: null,
+      discountTotal: null,
+      deliveryFee: null,
+      tipAmount: null,
+      totalOwing: null,
       total: null,
       fees: [],
-      minimumOrder: { value: null, met: null, shortfall: null },
-      violations: [],
-      quoteId: null,
-      quoteExpiry: null,
-      selectionInfo: {
-        note: CHECKOUT_SELECTION_NOTE,
-        deliverySlots: [],
-        tipPresetsCents: [1000, 2000, 3000, 5000],
-        customTipAllowed: true,
-      },
+      allowASAPDelivery: false,
+      deliverySlots: [],
+      availablePaymentMethods: [],
+      tipPresetsCents: [1000, 2000, 3000, 5000],
+      note: CHECKOUT_SELECTION_NOTE,
       message: CHECKOUT_EMPTY_CART_MESSAGE,
     });
   });
 
-  it("getCheckoutPreview reuses the pre-order call and never places an order", async () => {
+  it("getCheckoutPreview reads the pre-order response and never places an order", async () => {
     requestMock.mockImplementation(checkoutRouter);
     const dto = await getCheckoutPreview();
     expect(dto.populated).toBe(true);
     const urls = requestMock.mock.calls.map((c) => String(c[1]));
-    // Only cart read + pre-order + the informational slot lookup — no
+    // Only cart read + pre-order (+ profile for xsPlusMemberStatus) — no
     // order-submit / payment endpoint, no cart mutation.
     expect(
       urls.every(
         (u) =>
           u.includes("/carts/user") ||
           u.includes("/orders/pre-order") ||
-          u.includes("/first-delivery-slots")
+          u.includes("customer-profile")
       )
     ).toBe(true);
-    // The slot lookup WAS made and produced informational examples.
-    expect(urls.some((u) => u.includes("/first-delivery-slots"))).toBe(true);
-    expect(dto.selectionInfo.deliverySlots.length).toBeGreaterThan(0);
   });
 
-  it("mapCheckoutPreview attaches allowlisted selectionInfo (slots + tip presets)", () => {
-    const slots = mapFirstDeliverySlots(
-      {
-        allowASAPDelivery: true,
-        firstAvailableSlotSixtyMin: {
-          startTime: "2026-09-05T11:00:00+02:00",
-          endTime: "2026-09-05T12:00:00+02:00",
-        },
-        firstAvailableSlotOneDay: null,
-        deliveryFeesAndMinimumOrderValues: {
-          "sixty-min-delivery": { serviceOption: "sixty-min-delivery", deliveryFee: 37, minimumOrderValue: 150 },
-        },
-      } as never,
-      [
-        {
-          storeId: "store-1",
-          serviceOptionIds: ["sixty-min-delivery"],
-          brandPriority: 0,
-          hasCapacity: [],
-          distanceFromCustomer: 0,
-        },
-      ]
-    );
-    const dto = mapCheckoutPreview(preOrderFixture.totals, slots);
-    expectKeys(dto.selectionInfo, SELECTION_INFO_KEYS);
-    expect(dto.selectionInfo.note).toBe(CHECKOUT_SELECTION_NOTE);
-    expect(dto.selectionInfo.tipPresetsCents).toEqual([1000, 2000, 3000, 5000]);
-    expect(dto.selectionInfo.customTipAllowed).toBe(true);
-    dto.selectionInfo.deliverySlots.forEach((s) => expectKeys(s, SLOT_KEYS));
-  });
-
-  it("buildCheckoutSelectionInfo copies the tip presets (exported constant stays immutable)", () => {
-    const info = buildCheckoutSelectionInfo([]);
-    expect(info.tipPresetsCents).toEqual([...CHECKOUT_TIP_PRESETS_CENTS]);
-    info.tipPresetsCents.push(9999);
-    expect([...CHECKOUT_TIP_PRESETS_CENTS]).toEqual([1000, 2000, 3000, 5000]);
-  });
-
-  it("selectionInfo drops ALL PII/secrets from a poisoned first-delivery-slots", async () => {
+  it("a persistent pre-order 400 THROWS a typed error — never a fake-empty preview", async () => {
     requestMock.mockImplementation((...args: unknown[]) => {
       const url = String(args[1] ?? "");
       if (url.includes("/carts/user")) return ok(populatedCart);
-      if (url.includes("/orders/pre-order")) return ok(preOrderFixture);
-      if (url.includes("/first-delivery-slots")) {
-        return ok({
-          allowASAPDelivery: true,
-          firstAvailableSlotSixtyMin: {
-            startTime: "2026-09-05T11:00:00+02:00",
-            endTime: "2026-09-05T12:00:00+02:00",
-            ...POISON,
-          },
-          firstAvailableSlotOneDay: null,
-          deliveryFeesAndMinimumOrderValues: {
-            "sixty-min-delivery": {
-              serviceOption: "sixty-min-delivery",
-              deliveryFee: 37,
-              minimumOrderValue: 150,
-              ...POISON,
-            },
-          },
-          ...POISON,
-        });
+      if (url.includes("/orders/pre-order")) {
+        return Promise.reject(new APIError(400, "Bad Request", '{"message":"Invalid Request"}', "orders/pre-order"));
       }
       return routeRequest(...args);
     });
+    await expect(getCheckoutPreview()).rejects.toBeInstanceOf(APIError);
+  });
+
+  it("checkout --preview on a 400 throws a typed non-zero error and prints no 'Cart is empty'", async () => {
+    requestMock.mockImplementation((...args: unknown[]) => {
+      const url = String(args[1] ?? "");
+      if (url.includes("/carts/user")) return ok(populatedCart);
+      if (url.includes("/orders/pre-order")) {
+        return Promise.reject(new APIError(400, "Bad Request", "", "orders/pre-order"));
+      }
+      return routeRequest(...args);
+    });
+    let thrown: unknown;
+    const out = await captureStdout(async () => {
+      try {
+        await checkoutCommand({ preview: true });
+      } catch (err) {
+        thrown = err;
+      }
+    });
+    expect(thrown).toBeInstanceOf(APIError);
+    const c = classifyError(thrown);
+    expect(c.code).not.toBe(0);
+    expect(c.status).toBe(400);
+    // The genuine empty-cart guidance must NEVER appear on a 400.
+    expect(out).not.toContain("Cart is empty");
+    expect(out).not.toContain(CHECKOUT_EMPTY_CART_MESSAGE);
+  });
+
+  it("poisoned pre-order response end-to-end → clean preview DTO", async () => {
+    requestMock.mockImplementation(checkoutRouter);
     const out = await captureStdout(() => checkoutCommand({ preview: true, json: true }));
     const parsed = JSON.parse(out);
     assertClean(parsed);
     expectKeys(parsed, CHECKOUT_KEYS);
-    expectKeys(parsed.selectionInfo, SELECTION_INFO_KEYS);
-    expect(parsed.selectionInfo.deliverySlots.length).toBeGreaterThan(0);
-    parsed.selectionInfo.deliverySlots.forEach((s: object) => expectKeys(s, SLOT_KEYS));
+    parsed.deliverySlots.forEach((s: object) => expectKeys(s, PREVIEW_SLOT_KEYS));
+    // Payment card details (issuer/masked/token/holder) never surface — only type ids.
+    expect(parsed.availablePaymentMethods).toEqual(["ecentric-card", "stitch-capitec-pay"]);
   });
 
-  it("a failing first-delivery-slots degrades to deliverySlots: [] (totals still returned)", async () => {
-    requestMock.mockImplementation((...args: unknown[]) => {
-      const url = String(args[1] ?? "");
-      if (url.includes("/carts/user")) return ok(populatedCart);
-      if (url.includes("/orders/pre-order")) return ok(preOrderFixture);
-      if (url.includes("/first-delivery-slots")) return Promise.reject(new Error("slot lookup failed"));
-      return routeRequest(...args);
-    });
-    const dto = await getCheckoutPreview();
-    expect(dto.populated).toBe(true);
-    expect(dto.total).toBe(22350);
-    expect(dto.selectionInfo.deliverySlots).toEqual([]);
-    expect(dto.selectionInfo.tipPresetsCents).toEqual([1000, 2000, 3000, 5000]);
-  });
-
-  it("human output shows totals AND the slot/tip selection block with the note", async () => {
+  it("human output shows totals, slots, payment methods AND the tip note", async () => {
     requestMock.mockImplementation(checkoutRouter);
     const out = await captureStdout(() => checkoutCommand({ preview: true }));
     assertClean(out);
     expect(out).toContain("Checkout preview");
-    expect(out).toContain("Total");
-    expect(out).toContain("Selected in the app when you pay");
+    expect(out).toContain("Total payable");
+    expect(out).toContain("Delivery slots");
+    expect(out).toContain("Payment methods");
     expect(out).toContain("Driver tip (examples)");
     expect(out).toContain("R10.00");
     expect(out).toContain("custom");

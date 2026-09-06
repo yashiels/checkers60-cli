@@ -4,8 +4,7 @@ import { formatRand } from "../lib/format.js";
 import {
   getCheckoutPreview,
   type CheckoutPreviewDTO,
-  type CheckoutSelectionInfoDTO,
-  type SlotDTO,
+  type PreviewSlotDTO,
 } from "../lib/orders.js";
 import { startSpinner } from "../lib/output.js";
 
@@ -32,8 +31,12 @@ export async function checkout(options: CheckoutOptions = {}): Promise<void> {
   }
 
   const spinner = json ? null : startSpinner("Fetching checkout totals…");
-  const dto = await getCheckoutPreview();
-  spinner?.stop();
+  let dto: CheckoutPreviewDTO;
+  try {
+    dto = await getCheckoutPreview();
+  } finally {
+    spinner?.stop();
+  }
 
   if (json) {
     process.stdout.write(`${JSON.stringify(dto, null, 2)}\n`);
@@ -45,73 +48,50 @@ export async function checkout(options: CheckoutOptions = {}): Promise<void> {
 
 function renderHuman(dto: CheckoutPreviewDTO): void {
   if (!dto.populated) {
-    process.stdout.write(`${chalk.yellow(dto.message ?? "Cart is empty.")}\n`);
+    process.stdout.write(`${chalk.yellow(dto.message ?? CHECKOUT_EMPTY_FALLBACK)}\n`);
     return;
   }
 
   const lines: string[] = ["", chalk.bold("Checkout preview")];
   lines.push(`  Subtotal: ${formatRand(dto.subtotal)}`);
+  if (dto.discountTotal !== null && dto.discountTotal > 0) {
+    lines.push(chalk.green(`  Discount: -${formatRand(dto.discountTotal)}`));
+  }
   for (const fee of dto.fees) {
-    lines.push(`  ${fee.name}: ${formatRand(fee.amount)}`);
+    lines.push(`  Delivery (${fee.name}): ${formatRand(fee.amount)}`);
   }
-  lines.push(`  ${chalk.bold("Total")}: ${chalk.bold(formatRand(dto.total))} ${chalk.dim(dto.currency)}`);
+  if (dto.tipAmount !== null && dto.tipAmount > 0) {
+    lines.push(`  Driver tip: ${formatRand(dto.tipAmount)}`);
+  }
+  lines.push(
+    `  ${chalk.bold("Total payable")}: ${chalk.bold(formatRand(dto.total))} ${chalk.dim(dto.currency)}`
+  );
 
-  const { value, met, shortfall } = dto.minimumOrder;
-  if (value !== null) {
-    if (met === false) {
-      lines.push(
-        chalk.yellow(
-          `  Below minimum order (${formatRand(value)}) — add ${formatRand(shortfall)} more.`
-        )
-      );
-    } else if (met === true) {
-      lines.push(chalk.green(`  Minimum order met (${formatRand(value)}).`));
-    } else {
-      lines.push(chalk.dim(`  Minimum order: ${formatRand(value)}.`));
-    }
+  const available = dto.deliverySlots;
+  if (dto.allowASAPDelivery || available.length > 0) {
+    lines.push("", chalk.bold("Delivery slots"));
+    if (dto.allowASAPDelivery) lines.push(`  ${chalk.green("ASAP")} available`);
+    for (const s of available.slice(0, 6)) lines.push(`  ${formatSlot(s)}`);
   }
 
-  if (dto.violations.length > 0) {
-    lines.push(chalk.red("  Issues:"));
-    for (const v of dto.violations) lines.push(chalk.red(`    • ${v}`));
+  if (dto.availablePaymentMethods.length > 0) {
+    lines.push("", `${chalk.bold("Payment methods")}: ${dto.availablePaymentMethods.join(", ")}`);
   }
 
-  if (dto.quoteId || dto.quoteExpiry) {
-    const parts: string[] = [];
-    if (dto.quoteId) parts.push(`quote ${dto.quoteId}`);
-    if (dto.quoteExpiry) parts.push(`expires ${dto.quoteExpiry}`);
-    lines.push(chalk.dim(`  ${parts.join(", ")}`));
-  }
-
-  renderSelectionInfo(lines, dto.selectionInfo);
+  lines.push("", chalk.bold("Selected in the app when you pay"));
+  const presets = dto.tipPresetsCents.map((c) => formatRand(c));
+  presets.push("custom");
+  lines.push(`  Driver tip (examples): ${presets.join(", ")}`);
+  lines.push(chalk.dim(`  ${dto.note}`));
 
   process.stdout.write(`${lines.join("\n")}\n\n`);
 }
 
-/** Informational slot/tip examples — never stored by the CLI, chosen in the app. */
-function renderSelectionInfo(lines: string[], info: CheckoutSelectionInfoDTO): void {
-  lines.push("", chalk.bold("Selected in the app when you pay"));
+const CHECKOUT_EMPTY_FALLBACK = "Add items to your cart before previewing checkout totals.";
 
-  const available = info.deliverySlots.filter((s) => s.available || s.asap);
-  if (available.length > 0) {
-    lines.push(chalk.dim("  First delivery slots (examples):"));
-    for (const s of available) lines.push(`    ${formatSlot(s)}`);
-  }
-
-  const presets = info.tipPresetsCents.map((c) => formatRand(c));
-  if (info.customTipAllowed) presets.push("custom");
-  lines.push(`  Driver tip (examples): ${presets.join(", ")}`);
-
-  lines.push(chalk.dim(`  ${info.note}`));
-}
-
-function formatSlot(s: SlotDTO): string {
-  const when = s.asap ? "ASAP" : `${formatSlotTs(s.from)} – ${formatSlotTs(s.to)}`;
-  const extras: string[] = [];
-  if (s.deliveryFee !== null) extras.push(`fee R${s.deliveryFee}`);
-  if (s.minimumOrderValue !== null) extras.push(`min R${s.minimumOrderValue}`);
-  const suffix = extras.length > 0 ? ` (${extras.join(", ")})` : "";
-  return `${s.mode}: ${when}${suffix}`;
+function formatSlot(s: PreviewSlotDTO): string {
+  const when = s.displayName ?? `${formatSlotTs(s.from)} – ${formatSlotTs(s.to)}`;
+  return when;
 }
 
 function formatSlotTs(value: string | null): string {

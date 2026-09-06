@@ -159,12 +159,53 @@ export interface DeliverySlot {
   [key: string]: unknown;
 }
 
+/**
+ * One raw pre-order delivery slot. PII-free by construction (id/start/end +
+ * human display labels only) — orders.ts maps an allowlisted subset.
+ */
+export interface RawPreOrderSlot {
+  id?: string | null;
+  start?: string;
+  end?: string;
+  displayName?: string;
+  displayNameShort?: string;
+}
+
+/**
+ * Parsed pre-order response, split into the pieces orders.ts maps. `totals`,
+ * `payment` and `detailedDeliveryFees` are loosely typed and stay RAW here —
+ * orders.ts is the single redaction boundary that copies allowlisted fields
+ * (never a spread) and drops the payment block's card token/PAN/holder.
+ */
 export interface PreOrderResult {
-  slots: DeliverySlot[];
+  slots: RawPreOrderSlot[];
   asap: boolean;
-  totals?: unknown;
+  totals?: Record<string, unknown>;
+  detailedDeliveryFees?: Record<string, unknown>;
+  /** Raw payment block — orders.ts extracts only method-type strings. */
+  payment?: unknown;
   raw?: unknown;
 }
+
+/**
+ * The app's FIXED replacement-preference option set, sent verbatim in every
+ * pre-order request body (ids/codes/names are static app constants, no PII).
+ * The server 400s a pre-order whose cart omits this list.
+ */
+export const REPLACEMENT_OPTIONS: ReadonlyArray<{
+  id: string;
+  code: string;
+  name: string;
+  index: number;
+}> = [
+  { id: "5d3b0e8a325765a7d8351bcf", code: "replace-with", name: "Let me pick an alternative now", index: 1 },
+  { id: "5d3b0e8a325765a7d8351bcd", code: "best-match", name: "Choose a replacement on my behalf", index: 2 },
+  { id: "5d3b0e8a325765a7d8351bcc", code: "picker-decision", name: "Message me to approve a replacement", index: 3 },
+  { id: "5d3b0e8a325765a7d8351bce", code: "refund", name: "Just leave it out & don't replace", index: 4 },
+  { id: "5f721b9c1d5cc49a39b0a5af", code: "alternative-replace", name: "Replace", index: 5 },
+  { id: "5f721b9c1d5cc49a39b0a5b0", code: "alternative-dont-replace", name: "Don't replace", index: 6 },
+  { id: "5f721b9e1d5cc49a39b0a5b1", code: "alternative-not-selected", name: "No selection", index: 7 },
+];
 
 // ─── Raw domain envelopes (orders.ts is the normalization boundary) ──────────
 // These raw shapes are consumed ONLY by src/lib/orders.ts, which maps them to
@@ -951,18 +992,24 @@ export class CheckersAPI {
 
   /**
    * First available delivery slot per service option. A read-only POST (the app
-   * captures it as POST /api/v3/first-delivery-slots) that needs no cart — the
-   * body carries the store contexts. Raw; orders.ts maps a per-mode DTO.
+   * captures it as POST /api/v3/first-delivery-slots?ignoreCarts=true) that needs
+   * no cart. The body is a BARE ARRAY, one entry per store, carrying that store's
+   * served service options (field `servedServiceOptions`, NOT `serviceOptionIds`).
+   * Raw; orders.ts maps a per-mode DTO (fees/minimums are in RAND here).
    */
   async getFirstDeliverySlots(
     stores?: StoreContext[]
   ): Promise<RawFirstDeliverySlots> {
     const headers = await this.headers(stores);
     const storeContexts = stores ?? CONFIG.DEFAULT_STORES;
+    const body = storeContexts.map((s) => ({
+      storeId: s.storeId,
+      servedServiceOptions: s.serviceOptionIds ?? [],
+    }));
     const res = await request<RawFirstDeliverySlots>(
       "POST",
-      `${CONFIG.ORDERS_API}/api/v3/first-delivery-slots`,
-      { headers, json: { storeContexts }, retry: "safe" }
+      `${CONFIG.ORDERS_API}/api/v3/first-delivery-slots?ignoreCarts=true`,
+      { headers, json: body, retry: "safe" }
     );
     return res.data ?? {};
   }
@@ -1057,27 +1104,49 @@ export class CheckersAPI {
 
   /**
    * The mobile app only surfaces delivery slots during pre-order, so slots are
-   * tied to the current cart's line items.
+   * tied to the current cart's line items. The captured contract is an
+   * application/json POST (NOT the form-urlencoded quirk) carrying the FULL
+   * enriched cart the app sends: fixed replacementOptions, per-line
+   * availableForDelivery/ranged flags, lineItemTotals/cartSavings, the full
+   * storeContexts, and the account's xsPlusMemberStatus. A leaner body 400s.
+   * Returns the parsed slots + raw totals/payment/fees for orders.ts to map.
    */
-  async getDeliverySlots(): Promise<PreOrderResult> {
-    const { cartId, cartVersion, items } = await this.getCart();
+  async getDeliverySlots(stores?: StoreContext[]): Promise<PreOrderResult> {
+    const { cartId, cartVersion, items, cartSavings } = await this.getCart(stores);
     if (!cartId || items.length === 0) {
       return { slots: [], asap: false };
     }
-    const headers = await this.headers();
+    const session = await this.session();
+    const headers = this.sixty60Headers(session, stores);
+    const storeContexts = stores ?? CONFIG.DEFAULT_STORES;
+    const serviceOptionId = items[0]?.serviceOptionId ?? "sixty-min-delivery";
+
+    const productTotal = items.reduce((sum, li) => sum + (li.price ?? 0) * (li.quantity ?? 0), 0);
+    const discountTotal =
+      typeof cartSavings?.totalSavings === "number" ? cartSavings.totalSavings : 0;
+    const lineItemTotals = {
+      productTotal,
+      discountTotal,
+      cartTotalAfterDiscounts: productTotal - discountTotal,
+    };
+    const cartSavingsBody = {
+      productSavings: cartSavings?.productSavings ?? 0,
+      discountCodesSavings: cartSavings?.discountCodesSavings ?? 0,
+      totalSavings: cartSavings?.totalSavings ?? 0,
+    };
 
     const body = {
       cartsInfo: [
         {
-          cartId,
           cart: {
             id: cartId,
             cartVersion,
             updatedOn: Date.now(),
             lineItems: items.map((li) => ({
               id: li.id,
+              availableForDelivery: false,
               productId: li.productId,
-              storeId: li.storeId ?? CONFIG.DEFAULT_STORES[0].storeId,
+              storeId: li.storeId ?? storeContexts[0].storeId,
               price: li.price,
               previousPrice: li.previousPrice ?? 0,
               priceFactor: li.priceFactor ?? 100,
@@ -1088,27 +1157,49 @@ export class CheckersAPI {
               selectedWeightRange: null,
               missionName: "",
               missionType: "",
-              addToBasketType: "pdp_add_to_basket",
-              addToBasketJourney: "main_search_results",
+              addToBasketType: "quick_add",
+              addToBasketJourney: "cli",
               isStockAvailable: true,
               ranged: true,
               isSponsoredProduct: false,
-              serviceOptionId: "sixty-min-delivery",
+              serviceOptionId: li.serviceOptionId ?? serviceOptionId,
               hasAlcohol: false,
               requiresOver18: false,
             })),
+            userId: "",
+            deliverySlot: {},
+            replacementOptions: REPLACEMENT_OPTIONS.map((o) => ({ ...o })),
+            replacementPreferenceId: "",
+            minimumOrderValue: 0,
+            paymentCard: null,
+            stores: [],
+            serviceOptionId,
+            lineItemTotals,
+            cartSavings: cartSavingsBody,
+            maximumCartSize: 35,
+            warning: {},
           },
+          cartId,
+          driverTipAmount: 0,
         },
       ],
+      xsPlusMemberStatus: await this.xsPlusMemberStatus(),
+      storeContexts,
     };
 
     const t = Date.now();
     const res = await request<{
-      deliverySlots?: Record<string, { slots?: DeliverySlot[]; allowASAPDelivery?: boolean }>;
-      totals?: unknown;
+      deliverySlots?: Record<
+        string,
+        { slots?: RawPreOrderSlot[]; allowASAPDelivery?: boolean }
+      >;
+      detailedDeliveryFees?: Record<string, unknown>;
+      payment?: unknown;
+      totals?: Record<string, unknown>;
     }>("POST", `${CONFIG.ORDERS_API}/api/v3/orders/pre-order?t=${t}&screen=filter`, {
       headers,
-      form: body, // app quirk: form-urlencoded JSON body
+      json: body,
+      retry: "safe",
     });
 
     const slotData = res.data?.deliverySlots
@@ -1118,8 +1209,25 @@ export class CheckersAPI {
       slots: slotData?.slots ?? [],
       asap: slotData?.allowASAPDelivery ?? false,
       totals: res.data?.totals,
+      detailedDeliveryFees: res.data?.detailedDeliveryFees,
+      payment: res.data?.payment,
       raw: res.data,
     };
+  }
+
+  /**
+   * The account's Xtra Savings Plus membership status string sent in the
+   * pre-order body (`"active"`/`"inactive"`). Best-effort from the customer
+   * profile; a profile failure degrades to `"inactive"` rather than aborting an
+   * otherwise-valid pre-order.
+   */
+  private async xsPlusMemberStatus(): Promise<string> {
+    try {
+      const profile = await this.getCustomerProfile();
+      return profile.IsXtraSavingsCustomer === true ? "active" : "inactive";
+    } catch {
+      return "inactive";
+    }
   }
 
   // ── User profile (Shoprite DSL) ─────────────────────────────────────────
