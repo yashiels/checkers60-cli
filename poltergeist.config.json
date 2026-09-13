@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "projectType": "node",
+  "targets": [
+    {
+      "name": "checkers60",
+      "type": "executable",
+      "enabled": true,
+      "buildCommand": "make build",
+      "outputPath": "./dist/cli.js",
+      "watchPaths": ["src/**/*.ts", "package.json", "tsconfig*.json", "Makefile"]
+    }
+  ]
+}
