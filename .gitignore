@@ -5,3 +5,4 @@ dist/
 .checkers60/
 .worktrees/
 .worktrees
+.*.bun-build
