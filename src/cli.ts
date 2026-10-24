@@ -361,7 +361,8 @@ Examples:
 // ── cart ───────────────────────────────────────────────────────────────
 const cartCmd = program
   .command("cart")
-  .description("Show cart contents")
+  .description("Show all carts grouped by delivery mode")
+  .option("--mode <mode>", "Filter by delivery mode: sixty-min or one-day")
   .option("--deals", "Show which cart items qualify for bonus-buy deals", false)
   .option("--json", "Output JSON", false)
   .addHelpText(
@@ -369,14 +370,15 @@ const cartCmd = program
     `
 Examples:
   $ checkers60 cart
+  $ checkers60 cart --mode one-day --json
   $ checkers60 cart forgotten          # products you usually buy but haven't added
   $ checkers60 cart suggest            # smart-cart recommendations
 `
   )
   .action(
-    wrap(async (opts: { deals?: boolean; json?: boolean }) => {
+    wrap(async (opts: { deals?: boolean; json?: boolean; mode?: string }) => {
       const { cart } = await import("./commands/cart.js");
-      await cart({ json: mergeJson(opts), deals: opts.deals });
+      await cart({ json: mergeJson(opts), deals: opts.deals, mode: opts.mode });
     })
   );
 

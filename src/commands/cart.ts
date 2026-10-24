@@ -1,18 +1,16 @@
 import chalk from "chalk";
 import Table from "cli-table3";
-import {
-  CheckersAPI,
-  type BonusBuy,
-  type CartLineItem,
-  type Product,
-} from "../lib/api.js";
+import { CheckersAPI, type BonusBuy, type Product } from "../lib/api.js";
 import { formatRand } from "../lib/format.js";
 import { startSpinner } from "../lib/output.js";
+import { summarizeCart } from "../lib/cart-summary.js";
+import { resolveServiceOption } from "../lib/cart-mutate.js";
 import { classifyError } from "../lib/errors.js";
 
 export interface CartOptions {
   json?: boolean;
   deals?: boolean;
+  mode?: string;
 }
 
 /** One deal and the cart line items whose product qualifies for it. */
@@ -34,7 +32,7 @@ interface CartDeal {
  */
 async function resolveCartDeals(
   api: CheckersAPI,
-  items: CartLineItem[],
+  items: { productId: string }[],
   names: Map<string, string>
 ): Promise<{ deals: CartDeal[]; error: string | null }> {
   const productIds = items.map((i) => i.productId);
@@ -104,81 +102,99 @@ export async function resolveNames(
   return map;
 }
 
-export function cartTotal(items: CartLineItem[]): number {
-  return items.reduce((sum, i) => sum + i.price * i.quantity, 0);
-}
-
 export async function cart(options: CartOptions = {}): Promise<void> {
   const { json = false, deals: withDeals = false } = options;
-  const spinner = json ? null : startSpinner("Fetching cart…");
-
+  const serviceOptionId =
+    options.mode === undefined ? undefined : resolveServiceOption(options.mode);
+  const spinner = json ? null : startSpinner('Fetching carts…');
   const api = new CheckersAPI();
-  const state = await api.getCart();
-  const names = await resolveNames(
-    api,
-    state.items.map((i) => i.productId)
-  );
-  const { deals: cartDeals, error: dealsError } = withDeals
-    ? await resolveCartDeals(api, state.items, names)
-    : { deals: [], error: null };
-  spinner?.stop();
+  let carts;
+  try {
+    const snapshot = await api.getCarts();
+    const selected = snapshot.carts.filter(
+      (state) => serviceOptionId === undefined || state.serviceOptionId === serviceOptionId,
+    );
+    const names = await resolveNames(api, [
+      ...new Set(
+        selected.flatMap((state) => state.lineItems.map((item) => String(item.productId))),
+      ),
+    ]);
+    carts = await Promise.all(
+      selected.map(async (state) => {
+        const items = state.lineItems.map((item) => ({
+          productId: String(item.productId),
+          name: names.get(String(item.productId)) ?? null,
+          quantity: Number(item.quantity),
+          price: Number(item.price),
+        }));
+        const { deals, error: dealsError } = withDeals
+          ? await resolveCartDeals(api, items, names)
+          : { deals: [], error: null };
+        return {
+          ...summarizeCart(state),
+          items,
+          ...(withDeals ? { deals, dealsError } : {}),
+        };
+      }),
+    );
+  } finally {
+    spinner?.stop();
+  }
+  const primary = carts.find((state) => state.serviceOptionId === 'sixty-min-delivery') ?? carts[0];
+  const grandTotal = carts.reduce((sum, state) => sum + state.total, 0);
 
   if (json) {
     process.stdout.write(
       `${JSON.stringify(
         {
-          cartId: state.cartId,
-          cartVersion: state.cartVersion,
-          itemCount: state.items.length,
-          total: cartTotal(state.items),
-          items: state.items.map((i) => ({
-            productId: i.productId,
-            name: names.get(i.productId) ?? null,
-            quantity: i.quantity,
-            price: i.price,
-          })),
-          ...(withDeals ? { deals: cartDeals, dealsError } : {}),
+          cartId: primary?.cartId ?? null,
+          cartVersion: primary?.cartVersion ?? 0,
+          itemCount: primary?.itemCount ?? 0,
+          total: primary?.total ?? 0,
+          items: primary?.items ?? [],
+          ...(withDeals
+            ? { deals: primary?.deals ?? [], dealsError: primary?.dealsError ?? null }
+            : {}),
+          carts,
+          grandTotal,
         },
         null,
-        2
-      )}\n`
+        2,
+      )}\n`,
     );
     return;
   }
 
-  if (state.items.length === 0) {
-    process.stdout.write(`${chalk.yellow("Your cart is empty.")}\n`);
-    return;
+  if (carts.length === 0) {
+    process.stdout.write(`${chalk.yellow('No carts available for this selection.')}\n`);
   }
-
-  const table = new Table({
-    head: [
-      chalk.bold("Product"),
-      chalk.bold("Qty"),
-      chalk.bold("Unit"),
-      chalk.bold("Subtotal"),
-    ],
-    colWidths: [44, 6, 12, 12],
-    wordWrap: true,
-    style: { head: [], border: [] },
-  });
-
-  for (const item of state.items) {
-    const name = names.get(item.productId) ?? item.productId;
-    table.push([
-      name,
-      String(item.quantity),
-      formatRand(item.price),
-      formatRand(item.price * item.quantity),
-    ]);
+  for (const state of carts) {
+    process.stdout.write(`\n${chalk.bold(`${state.mode} cart`)}\n`);
+    if (state.items.length === 0) {
+      process.stdout.write(`${chalk.yellow('Your cart is empty.')}\n`);
+    } else {
+      const table = new Table({
+        head: ['Product', 'Qty', 'Unit', 'Subtotal'].map((label) => chalk.bold(label)),
+        colWidths: [44, 6, 12, 12],
+        wordWrap: true,
+        style: { head: [], border: [] },
+      });
+      for (const item of state.items) {
+        table.push([
+          item.name ?? item.productId,
+          String(item.quantity),
+          formatRand(item.price),
+          formatRand(item.price * item.quantity),
+        ]);
+      }
+      process.stdout.write(`${table.toString()}\n`);
+    }
+    process.stdout.write(
+      `${chalk.bold(`  Total: ${formatRand(state.total)}`)} ${chalk.dim(`(${state.itemCount} items)`)}\n\n`,
+    );
+    if (withDeals) printCartDeals(state.deals ?? [], state.dealsError ?? null);
   }
-
-  process.stdout.write(`\n${table.toString()}\n`);
-  process.stdout.write(
-    `${chalk.bold(`  Total: ${formatRand(cartTotal(state.items))}`)} ${chalk.dim(`(${state.items.length} items)`)}\n\n`
-  );
-
-  if (withDeals) printCartDeals(cartDeals, dealsError);
+  process.stdout.write(`${chalk.bold(`Grand total: ${formatRand(grandTotal)}`)}\n`);
 }
 
 /** Print the membership-only bonus-buy section for `cart --deals`. */

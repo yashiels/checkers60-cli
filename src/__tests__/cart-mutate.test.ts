@@ -354,6 +354,23 @@ describe("cart mutation gate — confirm", () => {
 });
 
 describe("cart mutation gate — reconcile", () => {
+  it.each(['sixty-min', 'one-day'])(
+    'names the written %s mode in divergent reconcile hints',
+    async (mode) => {
+      const f = fakeApi(snapshot([line()]), {
+        onCommit: (sent) => {
+          sent.carts[0].lineItems = [line({ productId: 'OTHER' })];
+          return sent;
+        },
+      });
+      await runCartMutation(f.api, 'cart.add', { json: true, mode }, addProd(1));
+      const planId = JSON.parse(String(outSpy.mock.calls.at(-1)![0])).plan.planId;
+      process.exitCode = 0;
+      await expect(
+        runCartMutation(f.api, 'cart.add', { json: true, confirm: planId }, addProd(1)),
+      ).rejects.toMatchObject({ reconcile: `checkers60 cart --mode ${mode} --json` });
+    },
+  );
   it("reports failure (exit 5) when the write left the cart unchanged", async () => {
     // onCommit ignores the sent body and keeps the original state (lost update).
     const original = snapshot([line({ quantity: 1 })]);

@@ -55,6 +55,7 @@ checkers60 add "full cream milk" 2
 
 # 5. Review your cart
 checkers60 cart
+checkers60 cart --mode one-day
 ```
 
 ---
@@ -80,10 +81,30 @@ checkers60 cart
 
 | Command | Description |
 |---------|-------------|
-| `cart` | Show cart contents. |
+| `cart` | Show all carts by delivery mode; filter with `--mode sixty-min` or `--mode one-day`. |
 | `add <query\|id> [qty]` | Add a product by search term or product id. Default qty: 1. |
 | `remove <query\|id>` | Remove a product by name or product id. |
 | `clear` | Empty the cart. |
+
+### Cart output
+
+`checkers60 cart` shows every available cart, including empty carts, grouped by
+`sixty-min` and `one-day`, with item counts, totals, and a grand total.
+Use `checkers60 cart --mode one-day --json` to inspect only the one-day cart.
+`--deals` resolves bonus-buy deals separately for each displayed cart.
+
+Cart JSON includes `carts`, whose entries contain `mode`, `serviceOptionId`,
+`cartId`, `cartVersion`, `itemCount`, `total`, and `items` (each with `productId`,
+`name`, `quantity`, and `price`). Prices and totals are in cents; `itemCount`
+counts line items. `grandTotal` sums the displayed carts. For compatibility,
+top-level `cartId`, `cartVersion`, `itemCount`, `total`, and `items` describe the
+sixty-min cart by default (or the first available cart if absent). With `--mode`,
+they describe the selected cart. With `--deals`, each cart also includes `deals`
+and `dealsError`; top-level deal fields describe the same primary cart.
+
+`checkers60 status --json` includes a `carts` summary for every mode with
+`itemCount`, `total`, and `nonEmpty`. Text status marks each cart as empty or
+non-empty. The existing `cart` summary still describes the primary cart.
 
 ### Account
 

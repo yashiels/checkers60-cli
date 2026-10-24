@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import { APIError, CheckersAPI, objectId } from "./api.js";
+import { cartMode } from "./cart-summary.js";
 import { CONFIG } from "./config.js";
 import {
   acquireConfirmLock,
@@ -44,7 +45,7 @@ export interface NewLineSpec {
   serviceOptionId: string;
 }
 
-function resolveServiceOption(mode?: string): string {
+export function resolveServiceOption(mode?: string): string {
   if (!mode) return MODE_SERVICE_OPTION["sixty-min"];
   const key = mode.toLowerCase();
   if (key === "sixty-min" || key === "sixty-min-delivery" || key === "60min")
@@ -497,7 +498,8 @@ export async function runCartMutation(
     } catch {
       // Dispatched but state is unreadable — genuinely unknown.
       throw new DivergentOutcomeError(
-        `Cart write was dispatched${cause} but the cart could not be re-read to confirm the outcome.`
+        `Cart write was dispatched${cause} but the cart could not be re-read to confirm the outcome.`,
+        `checkers60 cart --mode ${cartMode(planMutation.targetServiceOptionId)} --json`
       );
     }
 
@@ -505,7 +507,8 @@ export async function runCartMutation(
 
     if (outcome === "divergent") {
       throw new DivergentOutcomeError(
-        `Cart write dispatched${cause} but the cart matches neither the intended nor the original state.`
+        `Cart write dispatched${cause} but the cart matches neither the intended nor the original state.`,
+        `checkers60 cart --mode ${cartMode(planMutation.targetServiceOptionId)} --json`
       );
     }
     if (outcome === "unchanged") {

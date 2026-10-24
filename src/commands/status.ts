@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import { TokenManager, loadCredentials } from "../lib/credentials.js";
 import { CheckersAPI } from "../lib/api.js";
+import { summarizeCart } from "../lib/cart-summary.js";
 import { CONFIG } from "../lib/config.js";
 import { formatRand } from "../lib/format.js";
 import { startSpinner } from "../lib/output.js";
@@ -26,14 +27,23 @@ export async function status(options: StatusOptions = {}): Promise<void> {
 
   // Best-effort cart summary — only attempt when authenticated.
   let cart: CartSummary | null = null;
+  let carts: (ReturnType<typeof summarizeCart> & { nonEmpty: boolean })[] = [];
   let cartError: string | null = null;
   if (loggedIn) {
     const spinner = json ? null : startSpinner("Checking cart…");
     try {
       const api = new CheckersAPI(tokens);
-      const state = await api.getCart();
-      const total = state.items.reduce((sum, i) => sum + i.price * i.quantity, 0);
-      cart = { cartId: state.cartId, itemCount: state.items.length, total };
+      const snapshot = await api.getCarts();
+      carts = snapshot.carts.map((state) => ({
+        ...summarizeCart(state),
+        nonEmpty: state.lineItems.length > 0,
+      }));
+      const primary = carts.find((state) => state.serviceOptionId === 'sixty-min-delivery') ?? carts[0];
+      cart = {
+        cartId: primary?.cartId ?? null,
+        itemCount: primary?.itemCount ?? 0,
+        total: primary?.total ?? 0,
+      };
     } catch (err) {
       cartError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -51,6 +61,7 @@ export async function status(options: StatusOptions = {}): Promise<void> {
     sessionExpiry: sessionExpiry ? new Date(sessionExpiry).toISOString() : null,
     bffTokenExpiry: bffExpiry ? new Date(bffExpiry).toISOString() : null,
     cart: cart ?? null,
+    carts,
     cartError,
   };
 
@@ -75,11 +86,13 @@ export async function status(options: StatusOptions = {}): Promise<void> {
   process.stdout.write(`${chalk.dim(`   Stores: ${CONFIG.DEFAULT_STORES.length} configured`)}\n`);
   process.stdout.write(`${chalk.dim(`   Session expiry: ${formatExpiry(sessionExpiry)}`)}\n`);
 
-  if (cart) {
+  for (const summary of carts) {
+    const label = `   ${summary.mode} cart: ${summary.itemCount} item(s), ${formatRand(summary.total)}`;
     process.stdout.write(
-      `${chalk.dim(`   Cart: ${cart.itemCount} item(s), ${formatRand(cart.total)}`)}\n`
+      `${summary.nonEmpty ? chalk.yellow(`${label} [non-empty]`) : chalk.dim(`${label} [empty]`)}\n`,
     );
-  } else if (cartError) {
+  }
+  if (cartError) {
     process.stdout.write(`${chalk.yellow(`   Cart: unavailable (${cartError})`)}\n`);
   }
   process.stdout.write("\n");

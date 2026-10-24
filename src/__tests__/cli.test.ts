@@ -43,6 +43,14 @@ function runCli(args: string[], env: Record<string, string> = {}): Promise<Run> 
 }
 
 describe("CLI JSON mode — commander + error envelopes", () => {
+  it('cart --mode invalid returns usage exit 2', async () => {
+    const r = await runCli(['cart', '--mode', 'invalid', '--json']);
+    expect(r.code).toBe(2);
+    expect(JSON.parse(r.stdout)).toMatchObject({
+      code: 2,
+      error: expect.stringContaining('Unknown --mode'),
+    });
+  });
   it("status --json prints valid JSON and exits 0", async () => {
     const r = await runCli(["status", "--json"]);
     expect(r.code).toBe(0);
