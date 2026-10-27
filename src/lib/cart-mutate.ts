@@ -333,8 +333,8 @@ function assertNoDupModes(snapshot: PlanSnapshot): void {
  * ids and may legitimately re-price; comparing them would report false divergence.
  * Address is compared separately. Assumes no duplicate modes (checked upstream).
  */
-function modeSets(s: PlanSnapshot): Record<string, string> {
-  const out: Record<string, string> = {};
+function modeSets(s: PlanSnapshot): Record<string, { addr: string; items: string }> {
+  const out: Record<string, { addr: string; items: string }> = {};
   for (const c of s.carts) {
     const totals: Record<string, number> = {};
     for (const li of c.lineItems) {
@@ -346,19 +346,48 @@ function modeSets(s: PlanSnapshot): Record<string, string> {
       .sort((a, b) => a[0].localeCompare(b[0]));
     // Include the cart's own delivery address: a per-cart address change is a
     // collateral mutation that must not read as success.
-    out[c.serviceOptionId] = JSON.stringify({ addr: c.deliveryAddressId, items: entries });
+    out[c.serviceOptionId] = { addr: c.deliveryAddressId, items: JSON.stringify(entries) };
   }
   return out;
 }
 
+/**
+ * Per-cart address equality, `fresh` (post-write) against `expected`. A fresh
+ * cart (after checkout, or the one DELETE rotates in) has no address until its
+ * first write, when the server stamps the account address on it. So:
+ * - unset → the account address is the server stamping it, on any cart;
+ * - set → unset is accepted only on the target cart, and only when the write
+ *   was a DELETE that rotated it to a new cart id;
+ * anything else, including one real address replacing another, is collateral.
+ */
+function sameCartAddress(
+  fresh: string,
+  expected: string,
+  accountAddress: string,
+  isRotatedTarget: boolean
+): boolean {
+  if (fresh === expected) return true;
+  if (expected === "") return fresh === accountAddress;
+  if (fresh === "") return isRotatedTarget;
+  return false;
+}
+
 /** Whole-snapshot equality: EVERY cart's item set plus the delivery address. */
-function snapshotEquivalent(a: PlanSnapshot, b: PlanSnapshot): boolean {
-  if (a.deliveryAddressId !== b.deliveryAddressId) return false;
-  const ma = modeSets(a);
-  const mb = modeSets(b);
-  const keys = new Set([...Object.keys(ma), ...Object.keys(mb)]);
+function snapshotEquivalent(
+  fresh: PlanSnapshot,
+  expected: PlanSnapshot,
+  rotatedServiceOptionId: string | undefined
+): boolean {
+  if (fresh.deliveryAddressId !== expected.deliveryAddressId) return false;
+  const mf = modeSets(fresh);
+  const me = modeSets(expected);
+  const keys = new Set([...Object.keys(mf), ...Object.keys(me)]);
   for (const k of keys) {
-    if (ma[k] !== mb[k]) return false;
+    const x = mf[k];
+    const y = me[k];
+    if (!x || !y || x.items !== y.items) return false;
+    if (!sameCartAddress(x.addr, y.addr, fresh.deliveryAddressId, k === rotatedServiceOptionId))
+      return false;
   }
   return true;
 }
@@ -372,12 +401,13 @@ function snapshotEquivalent(a: PlanSnapshot, b: PlanSnapshot): boolean {
 function reconcile(
   fresh: PlanSnapshot,
   intended: PlanSnapshot,
-  original: PlanSnapshot
+  original: PlanSnapshot,
+  rotatedServiceOptionId?: string
 ): "success" | "unchanged" | "divergent" {
   // Ambiguity anywhere (esp. a post-dispatch duplicate mode) can't be a clean match.
   if (hasDupModes(fresh) || hasDupModes(intended) || hasDupModes(original)) return "divergent";
-  if (snapshotEquivalent(fresh, intended)) return "success";
-  if (snapshotEquivalent(fresh, original)) return "unchanged";
+  if (snapshotEquivalent(fresh, intended, rotatedServiceOptionId)) return "success";
+  if (snapshotEquivalent(fresh, original, rotatedServiceOptionId)) return "unchanged";
   return "divergent";
 }
 
@@ -503,7 +533,17 @@ export async function runCartMutation(
       );
     }
 
-    const outcome = reconcile(after, intended, planSnapshot);
+    // Only a DELETE that actually rotated the target cart may come back unaddressed.
+    const rotated =
+      willEmpty &&
+      !!findCartByMode(after, planMutation.targetServiceOptionId) &&
+      findCartByMode(after, planMutation.targetServiceOptionId)!.cartId !== planMutation.targetCartId;
+    const outcome = reconcile(
+      after,
+      intended,
+      planSnapshot,
+      rotated ? planMutation.targetServiceOptionId : undefined
+    );
 
     if (outcome === "divergent") {
       throw new DivergentOutcomeError(

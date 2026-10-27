@@ -146,6 +146,7 @@ function fakeApi(
         c.cartId = `${cartId}-new`;
         c.cartVersion = 0;
         c.lineItems = [];
+        c.deliveryAddressId = ""; // the real server's rotated cart is unaddressed
       }
     }
   });
@@ -170,6 +171,10 @@ type BuildFn = (
   targetCart: { cartId: string; lineItems: Record<string, unknown>[] },
   serviceOptionId: string
 ) => Promise<{ intent: MutationIntent; displayName?: string } | { noop: true; reason?: string }>;
+
+const clearAll: BuildFn = async (tc, so) => ({
+  intent: { operation: "cart.clear", targetCartId: tc.cartId, targetServiceOptionId: so },
+});
 
 const addProd =
   (qty = 1): BuildFn =>
@@ -449,6 +454,77 @@ describe("cart mutation gate — reconcile", () => {
         const s = structuredClone(sent);
         s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId =
           "addr-PER-CART-CHANGED";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1))
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  it("succeeds when the write stamps an address on a fresh, unaddressed cart", async () => {
+    // After checkout the server rotates in an empty cart with no address; the
+    // first write fills it in. That is not a collateral change.
+    const start = snapshot([]);
+    start.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId = "";
+    const f = fakeApi(start, {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId =
+          "addr-1";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1));
+    expect(lastJson().ok).toBe(true);
+  });
+
+  it("succeeds when a clear's DELETE rotates in an unaddressed cart", async () => {
+    const f = fakeApi(snapshot([line({ quantity: 1 })]));
+    const planId = await preview(f, clearAll, "cart.clear");
+    await runCartMutation(f.api, "cart.clear", { json: true, confirm: planId }, clearAll);
+    expect(f.del).toHaveBeenCalledOnce();
+    expect(lastJson().ok).toBe(true);
+  });
+
+  it("is divergent when an update (not a DELETE) clears the target cart's address", async () => {
+    const f = fakeApi(snapshot([line({ quantity: 1 })]), {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId = "";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1))
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  it("is divergent when a non-target cart's address is cleared collaterally", async () => {
+    const f = fakeApi(snapshot([line({ quantity: 1 })]), {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "one-day-delivery")!.deliveryAddressId = "";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1))
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  it("is divergent when an unaddressed cart is stamped with a non-account address", async () => {
+    const start = snapshot([]);
+    start.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId = "";
+    const f = fakeApi(start, {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId =
+          "addr-OTHER";
         return s;
       },
     });
