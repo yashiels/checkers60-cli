@@ -431,13 +431,17 @@ program
   .option("--json", "Output JSON", false)
   .option("--mode <mode>", "Target cart: sixty-min (default) or one-day")
   .option("--confirm <planId>", "Apply a previously previewed plan")
+  .option("--weight <range>", "Weighted products: pack range in grams, e.g. 300-500")
   .addHelpText(
     "after",
     `
 Writes are two-step: preview prints a plan id and exits 5; re-run with --confirm to apply.
+Weighted (per-kg) products use their only pack range unless --weight picks one, and are
+priced at the range's maximum weight, as the app does.
 
 Examples:
   $ checkers60 add "simple truth coconut water" 3            # preview → plan id
+  $ checkers60 add 5d3af63af434cf8420737da7 2 --weight 300-500  # 2 packs of mince
   $ checkers60 add "simple truth coconut water" 3 --confirm sha256:…
   $ checkers60 add 5d3b1d78e2f18700089552a8 --mode one-day
 `
@@ -447,13 +451,14 @@ Examples:
       async (
         target: string,
         qty: string | undefined,
-        opts: { json?: boolean; mode?: string; confirm?: string }
+        opts: { json?: boolean; mode?: string; confirm?: string; weight?: string }
       ) => {
         const { add } = await import("./commands/add.js");
         await add(target, qty === undefined ? 1 : parseCount(qty, "quantity"), {
           json: mergeJson(opts),
           mode: opts.mode,
           confirm: opts.confirm,
+          weight: opts.weight,
         });
       }
     )
@@ -466,6 +471,7 @@ program
   .option("--json", "Output JSON", false)
   .option("--mode <mode>", "Target cart: sixty-min (default) or one-day")
   .option("--confirm <planId>", "Apply a previously previewed plan")
+  .option("--weight <range>", "Weighted products in several ranges: which range, e.g. 300-500")
   .addHelpText(
     "after",
     `
@@ -482,13 +488,14 @@ Examples:
       async (
         target: string,
         qty: string | undefined,
-        opts: { json?: boolean; mode?: string; confirm?: string }
+        opts: { json?: boolean; mode?: string; confirm?: string; weight?: string }
       ) => {
         const { remove } = await import("./commands/remove.js");
         await remove(target, qty === undefined ? undefined : parseCount(qty, "quantity"), {
           json: mergeJson(opts),
           mode: opts.mode,
           confirm: opts.confirm,
+          weight: opts.weight,
         });
       }
     )

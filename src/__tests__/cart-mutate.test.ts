@@ -2,8 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CheckersAPI } from "../lib/api.js";
-import { buildWriteSnapshot, runCartMutation } from "../lib/cart-mutate.js";
+import { APIError, type CheckersAPI } from "../lib/api.js";
+import {
+  buildNewLine,
+  buildWriteSnapshot,
+  pickWeightRange,
+  productShapeReason,
+  resolveAddWeight,
+  runCartMutation,
+  safeErr,
+  sameRange,
+  weightedLinePrice,
+  weightRanges,
+} from "../lib/cart-mutate.js";
 import type { MutationIntent, PlanSnapshot } from "../lib/confirm.js";
 import { plansDir, PlanStaleError } from "../lib/confirm.js";
 import { DivergentOutcomeError, EXIT_CONFIRM, UsageError } from "../lib/errors.js";
@@ -171,6 +182,25 @@ type BuildFn = (
   serviceOptionId: string
 ) => Promise<{ intent: MutationIntent; displayName?: string } | { noop: true; reason?: string }>;
 
+const weightedAdd =
+  (range: { minimumValue: number; maximumValue: number }): BuildFn =>
+  async (targetCart, so) => {
+    const present = targetCart.lineItems.some(
+      (li) => li.productId === "PROD" && sameRange(li.selectedWeightRange, range)
+    );
+    return {
+      intent: {
+        operation: "cart.add",
+        targetCartId: targetCart.cartId,
+        targetServiceOptionId: so,
+        productId: "PROD",
+        quantity: 1,
+        weightRange: range,
+        newLine: present ? undefined : line({ id: "li-w", selectedWeightRange: range }),
+      },
+    };
+  };
+
 const addProd =
   (qty = 1): BuildFn =>
   async (targetCart, so) => {
@@ -196,6 +226,19 @@ const removeProd =
       targetServiceOptionId: so,
       productId: "PROD",
       quantity: qty,
+    },
+  });
+
+const removeWeighted =
+  (range: { minimumValue: number; maximumValue: number } | undefined, qty?: number): BuildFn =>
+  async (targetCart, so) => ({
+    intent: {
+      operation: "cart.remove",
+      targetCartId: targetCart.cartId,
+      targetServiceOptionId: so,
+      productId: "PROD",
+      quantity: qty,
+      weightRange: range,
     },
   });
 
@@ -555,11 +598,30 @@ describe("cart mutation gate — unsupported shapes", () => {
     ).rejects.toBeInstanceOf(UsageError);
   });
 
-  it("refuses to quantity-adjust a weighted line", async () => {
-    const f = fakeApi(snapshot([line({ selectedWeightRange: { min: 1, max: 2 } })]));
-    await expect(
-      runCartMutation(f.api, "cart.add", { json: true }, addProd(1))
-    ).rejects.toBeInstanceOf(UsageError);
+  it("merges an add into the existing line with the same weight range", async () => {
+    const range = { minimumValue: 300, maximumValue: 500 };
+    const f = fakeApi(snapshot([line({ selectedWeightRange: range })]));
+    const build = weightedAdd(range);
+    const planId = await preview(f, build, "cart.add");
+    await runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, build);
+    const body = f.commit.mock.calls[0][0] as PlanSnapshot;
+    const lines = body.carts.find((c) => c.cartId === "cart-60")!.lineItems;
+    expect(lines).toHaveLength(1);
+    expect(lines[0].quantity).toBe(2);
+  });
+
+  it("adds a separate line when the weight range differs", async () => {
+    const f = fakeApi(
+      snapshot([line({ selectedWeightRange: { minimumValue: 300, maximumValue: 500 } })])
+    );
+    const range = { minimumValue: 500, maximumValue: 700 };
+    const build = weightedAdd(range);
+    const planId = await preview(f, build, "cart.add");
+    await runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, build);
+    const body = f.commit.mock.calls[0][0] as PlanSnapshot;
+    const lines = body.carts.find((c) => c.cartId === "cart-60")!.lineItems;
+    expect(lines).toHaveLength(2);
+    expect(lines[1].selectedWeightRange).toEqual(range);
   });
 
   it("refuses an ambiguous cart state with two carts of the same mode", async () => {
@@ -741,5 +803,142 @@ describe("buildWriteSnapshot (tombstones for the merge-semantics /carts/update)"
     const before = structuredClone(intended);
     buildWriteSnapshot(prev, intended);
     expect(intended).toEqual(before);
+  });
+});
+
+describe("weighted products", () => {
+  const ranges = [
+    { minimumValue: 300, maximumValue: 500 },
+    { minimumValue: 500, maximumValue: 700 },
+  ];
+
+  it("resolves no range on --confirm, so a multi-range confirm needs no --weight", () => {
+    expect(resolveAddWeight("Mince", ranges, { confirm: "sha256:x" })).toBeUndefined();
+    expect(() => resolveAddWeight("Mince", ranges, {})).toThrow(/--weight/);
+    expect(() => resolveAddWeight("Milk", [], { weight: "300-500" })).toThrow(/not sold by weight/);
+  });
+
+  it("is divergent when the server swaps a weighted line's range", async () => {
+    const r1 = { minimumValue: 300, maximumValue: 500 };
+    const r2 = { minimumValue: 500, maximumValue: 700 };
+    const f = fakeApi(snapshot([line({ selectedWeightRange: r1 })]), {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        const lines = s.carts.find((c) => c.cartId === "cart-60")!.lineItems;
+        for (const li of lines) li.selectedWeightRange = r2; // collapse both lines onto r2
+        return s;
+      },
+    });
+    const build = weightedAdd(r2);
+    const planId = await preview(f, build, "cart.add");
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, build)
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  const twoRangeCart = () =>
+    snapshot([
+      line({ id: "li-a", selectedWeightRange: ranges[0], quantity: 2 }),
+      line({ id: "li-b", selectedWeightRange: ranges[1], quantity: 1 }),
+    ]);
+
+  it("removes only the chosen weight range's line", async () => {
+    const f = fakeApi(twoRangeCart());
+    const build = removeWeighted(ranges[0]);
+    const planId = await preview(f, build, "cart.remove");
+    await runCartMutation(f.api, "cart.remove", { json: true, confirm: planId }, build);
+    const sent = f.commit.mock.calls[0][0] as PlanSnapshot;
+    const live = sent.carts
+      .find((c) => c.cartId === "cart-60")!
+      .lineItems.filter((li) => Number(li.quantity) > 0);
+    expect(live.map((li) => li.id)).toEqual(["li-b"]);
+  });
+
+  it("decrements only within the chosen range", async () => {
+    const f = fakeApi(twoRangeCart());
+    const build = removeWeighted(ranges[1], 1);
+    const planId = await preview(f, build, "cart.remove");
+    await runCartMutation(f.api, "cart.remove", { json: true, confirm: planId }, build);
+    const sent = f.commit.mock.calls[0][0] as PlanSnapshot;
+    const a = sent.carts.find((c) => c.cartId === "cart-60")!.lineItems.find((li) => li.id === "li-a")!;
+    expect(a.quantity).toBe(2);
+  });
+
+  it("refuses a remove without a range when the product is in several ranges", async () => {
+    const f = fakeApi(twoRangeCart());
+    await expect(
+      runCartMutation(f.api, "cart.remove", { json: true }, removeWeighted(undefined))
+    ).rejects.toThrow(/several weight ranges/);
+  });
+
+  it("refuses to confirm when a line's range changed since the preview", async () => {
+    // Preview plans a NEW 500-700 line; meanwhile the existing line becomes 500-700.
+    // Without the range in the fingerprint, confirm would merge into it instead.
+    const f = fakeApi(snapshot([line({ selectedWeightRange: ranges[0] })]));
+    const build = weightedAdd(ranges[1]);
+    const planId = await preview(f, build, "cart.add");
+    f.mutate((s) => {
+      s.carts.find((c) => c.cartId === "cart-60")!.lineItems[0].selectedWeightRange = ranges[1];
+    });
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, build)
+    ).rejects.toBeInstanceOf(PlanStaleError);
+    expect(f.commit).not.toHaveBeenCalled();
+  });
+
+  it("reads ranges from variableWeightOptions", () => {
+    expect(weightRanges({ variableWeightOptions: [ranges[0]] })).toEqual([ranges[0]]);
+    expect(weightRanges({})).toEqual([]);
+  });
+
+  it("defaults to the only range and requires a choice when there are several", () => {
+    expect(pickWeightRange("Mince", [ranges[0]])).toEqual(ranges[0]);
+    expect(() => pickWeightRange("Mince", ranges)).toThrow(/--weight <300-500, 500-700>/);
+    expect(pickWeightRange("Mince", ranges, "500-700g")).toEqual(ranges[1]);
+    expect(() => pickWeightRange("Mince", ranges, "900-1100")).toThrow(UsageError);
+  });
+
+  it("prices a pack at the range maximum, rounded down (matches the app)", () => {
+    expect(weightedLinePrice(22999, { minimumValue: 900, maximumValue: 1100 })).toBe(25298);
+    expect(weightedLinePrice(12499, ranges[0])).toBe(6249);
+    expect(weightedLinePrice(9999, { minimumValue: 700, maximumValue: 900 })).toBe(8999);
+  });
+
+  it("allows weighted products with captured ranges, still refuses unknown weighted shapes", () => {
+    expect(productShapeReason({ variableWeightOptions: ranges })).toBeNull();
+    expect(productShapeReason({ sellByWeight: true })).toBe("weighted / priced by weight");
+  });
+
+  it("writes selectedWeightRange on a new line", () => {
+    const li = buildNewLine(
+      {
+        productId: "P",
+        name: "Mince",
+        price: 6249,
+        serviceOptionId: "sixty-min-delivery",
+        weightRange: ranges[0],
+      },
+      2
+    );
+    expect(li.selectedWeightRange).toEqual(ranges[0]);
+    expect(li.price).toBe(6249);
+  });
+});
+
+describe("safeErr", () => {
+  it("surfaces only the server message field", () => {
+    const body = '{"message":"Missing weight range","trace":"secret"}';
+    expect(safeErr(new APIError(400, "Bad Request", body, "/x"))).toBe(
+      "HTTP 400 Bad Request: Missing weight range"
+    );
+  });
+
+  it("strips terminal control characters from the server message", () => {
+    const body = JSON.stringify({ message: "out\u001b[2Jof\u0007 stock\u009b" });
+    expect(safeErr(new APIError(498, "Unknown", body, "/x"))).toBe("HTTP 498 Unknown: out [2Jof stock");
+  });
+
+  it("falls back to the status when the body has no message", () => {
+    expect(safeErr(new APIError(498, "Unknown", "<html>", "/x"))).toBe("HTTP 498 Unknown");
   });
 });

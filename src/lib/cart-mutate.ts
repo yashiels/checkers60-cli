@@ -18,6 +18,7 @@ import {
   type Plan,
   type PlanAccount,
   type PlanSnapshot,
+  type WeightRange,
 } from "./confirm.js";
 import { DivergentOutcomeError, EXIT_CONFIRM, UsageError } from "./errors.js";
 import { formatRand } from "./format.js";
@@ -43,6 +44,8 @@ export interface NewLineSpec {
   priceFactor?: number;
   storeId?: string;
   serviceOptionId: string;
+  /** Set for weighted products: becomes the line's `selectedWeightRange`. */
+  weightRange?: WeightRange;
 }
 
 export function resolveServiceOption(mode?: string): string {
@@ -68,8 +71,93 @@ function unsupportedReason(line: Record<string, unknown>): string | null {
   if (line.hasAlcohol === true || line.requiresOver18 === true) return "age-restricted";
   if (line.optionSelections != null && (line.optionSelections as unknown[]).length !== 0)
     return "has option selections";
-  if (line.selectedWeightRange != null) return "weighted / priced by weight";
   return null;
+}
+
+/** The pack-size ranges a weighted catalog product offers (`variableWeightOptions`), else []. */
+export function weightRanges(p: Record<string, unknown>): WeightRange[] {
+  const raw = p.variableWeightOptions;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((r) => r as Record<string, unknown>)
+    .filter((r) => Number.isFinite(r.minimumValue) && Number.isFinite(r.maximumValue))
+    .map((r) => ({
+      minimumValue: r.minimumValue as number,
+      maximumValue: r.maximumValue as number,
+    }));
+}
+
+export function formatWeightRange(r: WeightRange): string {
+  return `${r.minimumValue}-${r.maximumValue}`;
+}
+
+/**
+ * Choose the weight range for a weighted product. `requested` is "min-max" in
+ * grams (e.g. "300-500"); when omitted, the product's only range is used.
+ */
+/**
+ * The weight range `add` should use. On `--confirm` the plan already holds the
+ * range, so nothing is resolved (and a multi-range product needs no --weight).
+ */
+export function resolveAddWeight(
+  name: string,
+  ranges: WeightRange[],
+  options: { weight?: string; confirm?: string }
+): WeightRange | undefined {
+  if (options.confirm) return undefined;
+  if (ranges.length === 0) {
+    if (options.weight !== undefined) {
+      throw new UsageError(`"${name}" is not sold by weight; drop --weight.`);
+    }
+    return undefined;
+  }
+  return pickWeightRange(name, ranges, options.weight);
+}
+
+export function pickWeightRange(
+  name: string,
+  ranges: WeightRange[],
+  requested?: string
+): WeightRange {
+  const list = ranges.map(formatWeightRange).join(", ");
+  if (requested === undefined) {
+    if (ranges.length === 1) return ranges[0];
+    throw new UsageError(`"${name}" is sold by weight. Choose a range with --weight <${list}>.`);
+  }
+  const m = /^\s*(\d+)\s*-\s*(\d+)\s*g?\s*$/i.exec(requested);
+  const hit =
+    m &&
+    ranges.find((r) => r.minimumValue === Number(m[1]) && r.maximumValue === Number(m[2]));
+  if (!hit) {
+    throw new UsageError(`"${name}" has no ${requested} range. Available: ${list}.`);
+  }
+  return hit;
+}
+
+/**
+ * Line price for a weighted pack, in cents: the per-kg price scaled to the
+ * range's maximum weight, rounded down. Matches what the app writes (e.g.
+ * R229.99/kg × 1.1kg → 25298).
+ */
+export function weightedLinePrice(perKg: number, range: WeightRange): number {
+  return Math.floor((perKg * range.maximumValue) / 1000);
+}
+
+/** The distinct weight ranges across lines (an unweighted line counts as its own "range"). */
+export function distinctRanges(lines: Record<string, unknown>[]): (WeightRange | null)[] {
+  const out: (WeightRange | null)[] = [];
+  for (const li of lines) {
+    const r = (li.selectedWeightRange as WeightRange | null | undefined) ?? null;
+    if (!out.some((o) => (o === null ? r === null : sameRange(r, o)))) out.push(r);
+  }
+  return out;
+}
+
+/** Whether a line's `selectedWeightRange` is the given range (or both are unweighted). */
+export function sameRange(a: unknown, b: WeightRange | undefined): boolean {
+  if (b === undefined) return a == null;
+  const r = a as WeightRange | null | undefined;
+  return r != null && r.minimumValue === b.minimumValue && r.maximumValue === b.maximumValue;
 }
 
 /**
@@ -79,6 +167,8 @@ function unsupportedReason(line: Record<string, unknown>): string | null {
  */
 export function productShapeReason(p: Record<string, unknown>): string | null {
   if (p.hasAlcohol === true || p.requiresOver18 === true) return "age-restricted";
+  // Weighted products with captured pack ranges are supported (see weightRanges).
+  if (weightRanges(p).length > 0) return configurableReason(p);
   const weighted =
     p.sellByWeight === true ||
     p.isVariableWeight === true ||
@@ -88,6 +178,10 @@ export function productShapeReason(p: Record<string, unknown>): string | null {
     p.selectedWeightRange != null ||
     (Array.isArray(p.weightRanges) && (p.weightRanges as unknown[]).length > 0);
   if (weighted) return "weighted / priced by weight";
+  return configurableReason(p);
+}
+
+function configurableReason(p: Record<string, unknown>): string | null {
   const configurable =
     p.isConfigurable === true ||
     p.hasProductOptions === true ||
@@ -112,6 +206,10 @@ function fingerprint(snapshot: PlanSnapshot): string {
           productId: li.productId,
           quantity: li.quantity,
           price: li.price,
+          // Range is part of a weighted line's identity: drift since the preview must refuse.
+          range: li.selectedWeightRange
+            ? formatWeightRange(li.selectedWeightRange as WeightRange)
+            : null,
         }))
         .sort((a, b) => String(a.id).localeCompare(String(b.id))),
     }))
@@ -163,8 +261,10 @@ function applyMutation(snapshot: PlanSnapshot, intent: MutationIntent): PlanSnap
   }
 
   if (intent.operation === "cart.add") {
-    if (matches.length > 0) {
-      matches[0].quantity = (Number(matches[0].quantity) || 0) + (intent.quantity ?? 1);
+    // A weighted product can sit on several lines with different ranges; only merge into the same one.
+    const same = matches.filter((m) => sameRange(m.selectedWeightRange, intent.weightRange));
+    if (same.length > 0) {
+      same[0].quantity = (Number(same[0].quantity) || 0) + (intent.quantity ?? 1);
     } else {
       if (!intent.newLine) {
         throw new PlanStaleError("Missing line specification. Run the preview again.");
@@ -174,18 +274,27 @@ function applyMutation(snapshot: PlanSnapshot, intent: MutationIntent): PlanSnap
     return next;
   }
 
-  // cart.remove
-  if (matches.length === 0) {
+  // cart.remove — scoped to one weight range when the product is weighted.
+  const inScope = (li: Record<string, unknown>): boolean =>
+    li.productId === intent.productId &&
+    (intent.weightRange === undefined || sameRange(li.selectedWeightRange, intent.weightRange));
+  if (intent.weightRange === undefined && distinctRanges(matches).length > 1) {
+    throw new UsageError(
+      `"${intent.productId}" is in the cart in several weight ranges; choose one with --weight.`
+    );
+  }
+  const scoped = matches.filter(inScope);
+  if (scoped.length === 0) {
     throw new UsageError(`"${intent.productId}" is not in the ${cart.serviceOptionId} cart.`);
   }
-  const total = matches.reduce((n, m) => n + (Number(m.quantity) || 0), 0);
+  const total = scoped.reduce((n, m) => n + (Number(m.quantity) || 0), 0);
   if (intent.quantity === undefined || intent.quantity >= total) {
-    // Remove ALL lines for this product.
-    cart.lineItems = cart.lineItems.filter((li) => li.productId !== intent.productId);
+    // Remove ALL in-scope lines for this product.
+    cart.lineItems = cart.lineItems.filter((li) => !inScope(li));
   } else {
-    // Consume the requested quantity across matching lines, then drop emptied ones.
+    // Consume the requested quantity across in-scope lines, then drop emptied ones.
     let toRemove = intent.quantity;
-    for (const m of matches) {
+    for (const m of scoped) {
       if (toRemove <= 0) break;
       const q = Number(m.quantity) || 0;
       const take = Math.min(q, toRemove);
@@ -193,7 +302,7 @@ function applyMutation(snapshot: PlanSnapshot, intent: MutationIntent): PlanSnap
       toRemove -= take;
     }
     cart.lineItems = cart.lineItems.filter(
-      (li) => !(li.productId === intent.productId && (Number(li.quantity) || 0) === 0)
+      (li) => !(inScope(li) && (Number(li.quantity) || 0) === 0)
     );
   }
   return next;
@@ -338,8 +447,11 @@ function modeSets(s: PlanSnapshot): Record<string, string> {
   for (const c of s.carts) {
     const totals: Record<string, number> = {};
     for (const li of c.lineItems) {
-      const pid = String(li.productId);
-      totals[pid] = (totals[pid] ?? 0) + (Number(li.quantity) || 0);
+      // Weighted lines are keyed by range too, so a server swap or collapse of
+      // ranges can't match the intended per-product total.
+      const r = li.selectedWeightRange as WeightRange | null | undefined;
+      const key = r ? `${li.productId}@${formatWeightRange(r)}` : String(li.productId);
+      totals[key] = (totals[key] ?? 0) + (Number(li.quantity) || 0);
     }
     const entries = Object.entries(totals)
       .filter(([, q]) => q !== 0)
@@ -381,11 +493,34 @@ function reconcile(
   return "divergent";
 }
 
-/** Sanitized description of a dispatch error — never interpolates APIError.message (may carry a body). */
-function safeErr(err: unknown): string {
-  if (err instanceof APIError) return `HTTP ${err.status} ${err.statusText}`;
+/**
+ * Sanitized description of a dispatch error — never interpolates APIError.message
+ * or the raw body. Only the server's JSON `message` field is surfaced (e.g.
+ * "Missing weight range"), single-line and truncated.
+ */
+export function safeErr(err: unknown): string {
+  if (err instanceof APIError) {
+    const base = `HTTP ${err.status} ${err.statusText}`;
+    const msg = serverMessage(err.body);
+    return msg ? `${base}: ${msg}` : base;
+  }
   if (err instanceof Error) return err.name || "error";
   return "error";
+}
+
+function serverMessage(body: string): string | undefined {
+  try {
+    const m = (JSON.parse(body) as { message?: unknown } | null)?.message;
+    if (typeof m !== "string" || !m.trim()) return undefined;
+    // Strip control characters (ESC/BEL/C1) so a server string can't drive the terminal.
+    return m
+      .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 160);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -562,6 +697,8 @@ export function buildNewLine(spec: NewLineSpec, quantity: number): Record<string
     requiresOver18: false,
     isSponsoredProduct: false,
     hasAlcohol: false,
+    optionSelections: null,
+    selectedWeightRange: spec.weightRange ? { ...spec.weightRange } : null,
     product: null,
   };
 }
