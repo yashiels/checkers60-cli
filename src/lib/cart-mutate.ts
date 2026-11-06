@@ -351,23 +351,14 @@ function modeSets(s: PlanSnapshot): Record<string, { addr: string; items: string
   return out;
 }
 
-/**
- * Per-cart address equality, `fresh` (post-write) against `expected`. A fresh
- * cart (after checkout, or the one DELETE rotates in) has no address until its
- * first write, when the server stamps the account address on it. So:
- * - unset → the account address is the server stamping it, on any cart;
- * - set → unset is accepted only on the target cart, and only when the write
- *   was a DELETE that rotated it to a new cart id;
- * anything else, including one real address replacing another, is collateral.
- */
 function sameCartAddress(
   fresh: string,
   expected: string,
-  accountAddress: string,
+  stampAddress: string,
   isRotatedTarget: boolean
 ): boolean {
   if (fresh === expected) return true;
-  if (expected === "") return fresh === accountAddress;
+  if (expected === "") return fresh === stampAddress;
   if (fresh === "") return isRotatedTarget;
   return false;
 }
@@ -378,7 +369,16 @@ function snapshotEquivalent(
   expected: PlanSnapshot,
   rotatedServiceOptionId: string | undefined
 ): boolean {
-  if (fresh.deliveryAddressId !== expected.deliveryAddressId) return false;
+  if (fresh.deliveryAddressId !== expected.deliveryAddressId) {
+    const freshDerivedAddress = fresh.carts.find((c) => c.deliveryAddressId)?.deliveryAddressId ?? "";
+    const expectedDerivedAddress =
+      expected.carts.find((c) => c.deliveryAddressId)?.deliveryAddressId ?? "";
+    if (
+      fresh.deliveryAddressId !== freshDerivedAddress ||
+      expected.deliveryAddressId !== expectedDerivedAddress
+    )
+      return false;
+  }
   const mf = modeSets(fresh);
   const me = modeSets(expected);
   const keys = new Set([...Object.keys(mf), ...Object.keys(me)]);
@@ -386,7 +386,14 @@ function snapshotEquivalent(
     const x = mf[k];
     const y = me[k];
     if (!x || !y || x.items !== y.items) return false;
-    if (!sameCartAddress(x.addr, y.addr, fresh.deliveryAddressId, k === rotatedServiceOptionId))
+    if (
+      !sameCartAddress(
+        x.addr,
+        y.addr,
+        expected.deliveryAddressId || fresh.deliveryAddressId,
+        k === rotatedServiceOptionId
+      )
+    )
       return false;
   }
   return true;
