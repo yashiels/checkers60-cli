@@ -79,6 +79,14 @@ export interface MutationIntent {
   quantity?: number;
   /** add only: the fully-formed line to append when the product is not already in the cart. */
   newLine?: Record<string, unknown>;
+  /** add only: the weight range of a weighted product; lines merge only when it matches. */
+  weightRange?: WeightRange;
+}
+
+/** A weighted product's pack-size range in grams (the `selectedWeightRange` wire shape). */
+export interface WeightRange {
+  minimumValue: number;
+  maximumValue: number;
 }
 
 export interface PlanAccount {
