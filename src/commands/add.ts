@@ -34,23 +34,24 @@ export async function add(target: string, qty = 1, options: AddOptions = {}): Pr
     throw new UsageError(`Invalid quantity "${qty}". Must be a positive integer.`);
   }
 
-  const spinner = options.json ? null : startSpinner(`Finding "${target}"…`);
   const api = new CheckersAPI();
-  const pick = await resolvePick(api, target);
-  spinner?.stop();
-
-  const reason = productShapeReason(pick.raw);
-  if (reason) {
-    throw new UsageError(`"${pick.name}" is ${reason}; adding it via the CLI is not supported yet.`);
-  }
-
-  const weightRange = resolveAddWeight(pick.name, weightRanges(pick.raw), options);
-  const price = weightRange ? weightedLinePrice(pick.price, weightRange) : pick.price;
-  const displayName = weightRange
-    ? `${pick.name} [${formatWeightRange(weightRange)}g]`
-    : pick.name;
 
   await runCartMutation(api, "cart.add", options, async (targetCart, serviceOptionId) => {
+    const spinner = options.json ? null : startSpinner(`Finding "${target}"…`);
+    const pick = await resolvePick(api, target);
+    spinner?.stop();
+
+    const reason = productShapeReason(pick.raw);
+    if (reason) {
+      throw new UsageError(`"${pick.name}" is ${reason}; adding it via the CLI is not supported yet.`);
+    }
+
+    const weightRange = resolveAddWeight(pick.name, weightRanges(pick.raw), options);
+    const price = weightRange ? weightedLinePrice(pick.price, weightRange) : pick.price;
+    const displayName = weightRange
+      ? `${pick.name} [${formatWeightRange(weightRange)}g]`
+      : pick.name;
+
     const present = targetCart.lineItems.some(
       (li) => li.productId === pick.id && sameRange(li.selectedWeightRange, weightRange)
     );
@@ -84,9 +85,10 @@ export async function add(target: string, qty = 1, options: AddOptions = {}): Pr
 
 async function resolvePick(api: CheckersAPI, target: string): Promise<Pick> {
   if (isProductId(target)) {
-    const details = await api.getProductDetails([target]);
+    const productId = target.toLowerCase();
+    const details = await api.getProductDetails([productId]);
     // The filter can return other display variants; never fall back to one of them.
-    const d = details.find((x) => x.id === target);
+    const d = details.find((x) => x.id.toLowerCase() === productId);
     if (!d) throw new UsageError(`Product ${target} not found.`);
     if (d.priceWithoutDecimal === undefined) {
       throw new UsageError(`Product ${target} has no price and cannot be added.`);
