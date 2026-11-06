@@ -116,7 +116,10 @@ function fakeApi(
   const getCarts = vi.fn(async () => {
     reads += 1;
     if (opts.failReadOnCall && reads === opts.failReadOnCall) throw new Error("read failed");
-    return structuredClone(state);
+    return {
+      ...structuredClone(state),
+      deliveryAddressId: state.carts.find((c) => c.deliveryAddressId)?.deliveryAddressId ?? "",
+    };
   });
   const commit = vi.fn(async (s: PlanSnapshot) => {
     if ("throwOnCommit" in opts) {
@@ -146,6 +149,7 @@ function fakeApi(
         c.cartId = `${cartId}-new`;
         c.cartVersion = 0;
         c.lineItems = [];
+        c.deliveryAddressId = ""; // the real server's rotated cart is unaddressed
       }
     }
   });
@@ -170,6 +174,10 @@ type BuildFn = (
   targetCart: { cartId: string; lineItems: Record<string, unknown>[] },
   serviceOptionId: string
 ) => Promise<{ intent: MutationIntent; displayName?: string } | { noop: true; reason?: string }>;
+
+const clearAll: BuildFn = async (tc, so) => ({
+  intent: { operation: "cart.clear", targetCartId: tc.cartId, targetServiceOptionId: so },
+});
 
 const addProd =
   (qty = 1): BuildFn =>
@@ -434,6 +442,7 @@ describe("cart mutation gate — reconcile", () => {
       onCommit: (sent) => {
         const s = structuredClone(sent);
         s.deliveryAddressId = "addr-CHANGED";
+        for (const cart of s.carts) cart.deliveryAddressId = "addr-CHANGED";
         return s;
       },
     });
@@ -449,6 +458,174 @@ describe("cart mutation gate — reconcile", () => {
         const s = structuredClone(sent);
         s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId =
           "addr-PER-CART-CHANGED";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1))
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  it("succeeds when the write stamps an address on a fresh, unaddressed cart", async () => {
+    // After checkout the server rotates in an empty cart with no address; the
+    // first write fills it in. That is not a collateral change.
+    const start = snapshot([]);
+    start.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId = "";
+    const f = fakeApi(start, {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId =
+          "addr-1";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1));
+    expect(lastJson().ok).toBe(true);
+  });
+
+  it("succeeds when a clear's DELETE rotates in an unaddressed cart", async () => {
+    const f = fakeApi(snapshot([line({ quantity: 1 })]));
+    const planId = await preview(f, clearAll, "cart.clear");
+    await runCartMutation(f.api, "cart.clear", { json: true, confirm: planId }, clearAll);
+    expect(f.del).toHaveBeenCalledOnce();
+    expect(lastJson().ok).toBe(true);
+  });
+
+  it.each(["cart.clear", "cart.remove"] as const)(
+    "succeeds when %s rotates the only addressed cart",
+    async (operation) => {
+      const start = snapshot([line()]);
+      start.carts[1].deliveryAddressId = "";
+      const f = fakeApi(start);
+      const build = operation === "cart.clear" ? clearAll : removeProd();
+      const planId = await preview(f, build, operation);
+      await runCartMutation(f.api, operation, { json: true, confirm: planId }, build);
+      expect(f.del).toHaveBeenCalledOnce();
+      expect(lastJson()).toMatchObject({ ok: true, itemCount: 0 });
+      expect((await f.api.getCarts()).deliveryAddressId).toBe("");
+    }
+  );
+
+  it("succeeds when the first addressed cart appears after an update", async () => {
+    const start = snapshot([]);
+    for (const cart of start.carts) cart.deliveryAddressId = "";
+    start.deliveryAddressId = "";
+    const f = fakeApi(start, {
+      onCommit: (sent) => {
+        sent.carts[0].deliveryAddressId = "addr-1";
+        return sent;
+      },
+    });
+    const planId = await preview(f, addProd());
+    await runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd());
+    expect(lastJson().ok).toBe(true);
+  });
+
+  it("rejects an update that clears the only addressed cart", async () => {
+    const start = snapshot([line()]);
+    start.carts[1].deliveryAddressId = "";
+    const f = fakeApi(start, {
+      onCommit: (sent) => {
+        sent.carts[0].deliveryAddressId = "";
+        return sent;
+      },
+    });
+    const planId = await preview(f, addProd());
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd())
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  it("rejects collateral address clearing during target rotation", async () => {
+    const f = fakeApi(snapshot([line()]));
+    f.del.mockImplementation(async (cartId: string) => {
+      f.mutate((state) => {
+        for (const cart of state.carts) {
+          cart.deliveryAddressId = "";
+          if (cart.cartId === cartId) {
+            cart.cartId = `${cartId}-new`;
+            cart.lineItems = [];
+          }
+        }
+      });
+    });
+    const planId = await preview(f, clearAll, "cart.clear");
+    await expect(
+      runCartMutation(f.api, "cart.clear", { json: true, confirm: planId }, clearAll)
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  it("rejects substitution with another address during target rotation", async () => {
+    const start = snapshot([line()]);
+    start.carts[1].deliveryAddressId = "";
+    const f = fakeApi(start);
+    f.del.mockImplementation(async () => {
+      f.mutate((state) => {
+        state.carts[0].cartId = "rotated";
+        state.carts[0].lineItems = [];
+        state.carts[0].deliveryAddressId = "addr-OTHER";
+      });
+    });
+    const planId = await preview(f, clearAll, "cart.clear");
+    await expect(
+      runCartMutation(f.api, "cart.clear", { json: true, confirm: planId }, clearAll)
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  it("rejects address clearing after a DELETE without target rotation", async () => {
+    const start = snapshot([line()]);
+    start.carts[1].deliveryAddressId = "";
+    const f = fakeApi(start);
+    f.del.mockImplementation(async () => {
+      f.mutate((state) => {
+        state.carts[0].lineItems = [];
+        state.carts[0].deliveryAddressId = "";
+      });
+    });
+    const planId = await preview(f, clearAll, "cart.clear");
+    await expect(
+      runCartMutation(f.api, "cart.clear", { json: true, confirm: planId }, clearAll)
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  it("is divergent when an update (not a DELETE) clears the target cart's address", async () => {
+    const f = fakeApi(snapshot([line({ quantity: 1 })]), {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId = "";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1))
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  it("is divergent when a non-target cart's address is cleared collaterally", async () => {
+    const f = fakeApi(snapshot([line({ quantity: 1 })]), {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "one-day-delivery")!.deliveryAddressId = "";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1))
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  it("is divergent when an unaddressed cart is stamped with a non-account address", async () => {
+    const start = snapshot([]);
+    start.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId = "";
+    const f = fakeApi(start, {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId =
+          "addr-OTHER";
         return s;
       },
     });

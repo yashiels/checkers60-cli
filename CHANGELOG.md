@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevent false cart divergence when a fresh cart receives an address or DELETE rotates in an unaddressed cart, including derived-address regression coverage. Thanks @rsdouglas (#61).
 - **Search was completely broken** — `searchProducts` sent the catalog request as form-urlencoded, which the API rejects with HTTP 400; it now sends JSON (matching the working `getProductDetails` call). `search` and `add <term>` work again.
 - **Result count** now reports the catalog's real `totalCount` instead of the current page's size.
 - **Promotion badge (🏷️)** now derives from the real catalog signals (`isOnPromotion` / discounted `oldPrice` / bonus-buy membership); it previously read a `promotions` array that the API never returns, so it never showed.
